@@ -8,20 +8,19 @@
   "kv_namespaces": [
     {
       "binding": "SHARES",
-      "id": "YOUR_KV_NAMESPACE_ID",
-      "preview_id": "YOUR_KV_PREVIEW_NAMESPACE_ID"
+      "id": "1b52528c0330431e89611dd274fe67f3",
+      "preview_id": "90f24114fbc647dd9fa2a2568c38531d"
     }
   ],
 
-  // 部署前请替换为你自己的 R2 bucket 名称
   "r2_buckets": [
     {
       "binding": "FILES",
-      "bucket_name": "YOUR_R2_BUCKET_NAME"
+      "bucket_name": "notelink"
     }
   ],
 
   "vars": {
-    "R2_BUCKET_NAME": "YOUR_R2_BUCKET_NAME"
+    "R2_BUCKET_NAME": "notelink"
   }
 }
