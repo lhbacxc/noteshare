@@ -10,6 +10,12 @@ class WorkerClientError(Exception):
 
 
 class WorkerClient:
+    DEFAULT_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Safari/537.36"
+    )
+
     def __init__(self, base_url: str, admin_token: str) -> None:
         normalized_base_url = base_url.strip().rstrip("/")
         if not normalized_base_url:
@@ -57,6 +63,8 @@ class WorkerClient:
         headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self.admin_token}",
+            "User-Agent": self.DEFAULT_USER_AGENT,
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         }
 
         if payload is not None:
@@ -104,5 +112,17 @@ def _build_http_error_message(exc: error.HTTPError) -> str:
             detail = str(parsed.get("error", "")).strip()
             if detail:
                 return f"Worker 返回错误（{status}）：{detail}"
+
+        compact_body = " ".join(raw_body.split())
+        if compact_body:
+            preview = compact_body[:180]
+            return f"Worker 返回错误（{status}）：{preview}"
+
+    if status == 403:
+        return (
+            "Worker 返回错误（403）：访问被 Cloudflare 拒绝。"
+            "请检查 Worker 地址、ADMIN_TOKEN、workers.dev 访问策略，"
+            "以及当前网络环境是否被 Cloudflare 拦截。"
+        )
 
     return f"Worker 返回错误（{status}）。"

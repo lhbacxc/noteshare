@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -23,6 +24,7 @@ class R2GuiApp:
         self.all_objects: list[dict[str, object]] = []
         self.filtered_objects: list[dict[str, object]] = []
         self.buttons: list[ttk.Button] = []
+        self.ui_queue: queue.Queue = queue.Queue()
 
         self.account_id_var = StringVar(value=self.config_data.get("account_id", ""))
         self.access_key_var = StringVar(value=self.config_data.get("access_key_id", ""))
@@ -49,6 +51,7 @@ class R2GuiApp:
         self.search_var.trace_add("write", self._on_search_change)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_selection_change)
         self.root.after(200, self._auto_refresh_on_startup)
+        self.root.after(100, self._process_ui_queue)
         self.root.after(self.COUNTDOWN_REFRESH_MS, self._refresh_countdown_timer)
 
     def _build_layout(self) -> None:
@@ -362,18 +365,37 @@ class R2GuiApp:
                 result = task()
             except Exception as exc:  # noqa: BLE001
                 if on_error is None:
-                    self.root.after(0, lambda: self._handle_task_error(exc))
+                    self._enqueue_ui(lambda exc=exc: self._handle_task_error(exc))
                 else:
-                    self.root.after(0, lambda: on_error(exc))
+                    self._enqueue_ui(lambda exc=exc: on_error(exc))
                 return
 
             if on_success is None:
-                self.root.after(0, self._handle_task_success)
+                self._enqueue_ui(self._handle_task_success)
                 return
 
-            self.root.after(0, lambda: self._handle_task_success(on_success, result))
+            self._enqueue_ui(lambda: self._handle_task_success(on_success, result))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _enqueue_ui(self, callback) -> None:
+        self.ui_queue.put(callback)
+
+    def _process_ui_queue(self) -> None:
+        while True:
+            try:
+                callback = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            try:
+                callback()
+            except Exception as exc:  # noqa: BLE001
+                self._set_buttons_state(False)
+                self._set_status("操作失败")
+                messagebox.showerror("GUI 回调失败", str(exc))
+
+        self.root.after(100, self._process_ui_queue)
 
     def _handle_task_error(self, exc: Exception) -> None:
         self._set_buttons_state(False)
@@ -384,7 +406,11 @@ class R2GuiApp:
         self._set_buttons_state(False)
         self._set_status("操作完成")
         if callback is not None:
-            callback(result)
+            try:
+                callback(result)
+            except Exception as exc:  # noqa: BLE001
+                self._set_status("操作失败")
+                messagebox.showerror("回调处理失败", str(exc))
 
     def save_current_config(self) -> None:
         try:
@@ -970,8 +996,11 @@ class R2GuiApp:
     def _parse_datetime(self, value: str) -> datetime | None:
         if not value:
             return None
+        normalized = value.strip()
+        if normalized.endswith("Z"):
+            normalized = f"{normalized[:-1]}+00:00"
         try:
-            parsed = datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(normalized)
         except ValueError:
             return None
         if parsed.tzinfo is None:
