@@ -7,6 +7,7 @@ from tkinter import END, StringVar, Tk, filedialog, messagebox, simpledialog, tt
 
 from config_manager import load_config, save_config
 from r2_client import R2Credentials, R2Manager
+from worker_client import WorkerClient, WorkerClientError
 
 
 class R2GuiApp:
@@ -15,8 +16,8 @@ class R2GuiApp:
     def __init__(self, root: Tk) -> None:
         self.root = root
         self.root.title("NoteShare R2 管理工具")
-        self.root.geometry("1320x800")
-        self.root.minsize(1080, 680)
+        self.root.geometry("1440x860")
+        self.root.minsize(1180, 720)
 
         self.config_data = load_config()
         self.all_objects: list[dict[str, object]] = []
@@ -27,6 +28,12 @@ class R2GuiApp:
         self.access_key_var = StringVar(value=self.config_data.get("access_key_id", ""))
         self.secret_key_var = StringVar(value=self.config_data.get("secret_access_key", ""))
         self.endpoint_var = StringVar(value=self.config_data.get("endpoint_url", ""))
+        self.worker_base_url_var = StringVar(
+            value=self.config_data.get("worker_base_url", "")
+        )
+        self.worker_admin_token_var = StringVar(
+            value=self.config_data.get("worker_admin_token", "")
+        )
         self.bucket_var = StringVar(value=self.config_data.get("default_bucket", ""))
         self.expire_var = StringVar(
             value=str(self.config_data.get("url_expire_seconds", 3600))
@@ -34,6 +41,7 @@ class R2GuiApp:
         self.prefix_var = StringVar()
         self.search_var = StringVar()
         self.url_var = StringVar()
+        self.share_url_var = StringVar()
         self.status_var = StringVar(value="就绪")
 
         self._build_layout()
@@ -66,15 +74,30 @@ class R2GuiApp:
         )
         self._add_labeled_entry(config_frame, "Endpoint URL", self.endpoint_var, 1, 0)
         self._add_labeled_entry(config_frame, "默认过期秒数", self.expire_var, 1, 1)
+        self._add_labeled_entry(
+            config_frame,
+            "Worker Base URL",
+            self.worker_base_url_var,
+            1,
+            2,
+        )
+        self._add_labeled_entry(
+            config_frame,
+            "Worker Admin Token",
+            self.worker_admin_token_var,
+            2,
+            0,
+            show="*",
+        )
 
         ttk.Label(config_frame, text="Bucket").grid(
-            row=2, column=2, sticky="w", padx=6, pady=(0, 4)
+            row=4, column=1, sticky="w", padx=6, pady=(0, 4)
         )
         self.bucket_combo = ttk.Combobox(config_frame, textvariable=self.bucket_var)
-        self.bucket_combo.grid(row=3, column=2, sticky="ew", padx=6, pady=(0, 8))
+        self.bucket_combo.grid(row=5, column=1, sticky="ew", padx=6, pady=(0, 8))
 
         button_bar = ttk.Frame(config_frame)
-        button_bar.grid(row=3, column=3, columnspan=3, sticky="e", padx=6, pady=(0, 8))
+        button_bar.grid(row=5, column=2, columnspan=4, sticky="e", padx=6, pady=(0, 8))
 
         self.save_button = self._make_button(button_bar, "保存配置", self.save_current_config)
         self.test_button = self._make_button(button_bar, "测试连接", self.test_connection)
@@ -147,22 +170,44 @@ class R2GuiApp:
         button_row.grid(row=0, column=0, sticky="ew")
 
         self.upload_button = self._make_button(button_row, "上传文件", self.upload_file)
-        self.download_button = self._make_button(button_row, "下载选中对象", self.download_selected)
+        self.download_button = self._make_button(
+            button_row, "下载选中对象", self.download_selected
+        )
         self.delete_button = self._make_button(button_row, "删除选中对象", self.delete_selected)
         self.set_expire_button = self._make_button(
             button_row,
             "设置选中文件过期秒数",
             self.set_selected_file_expire_seconds,
         )
-        self.url_button = self._make_button(button_row, "生成预签名 URL", self.generate_presigned_url)
+        self.url_button = self._make_button(
+            button_row, "生成预签名 URL", self.generate_presigned_url
+        )
         self.copy_url_button = self._make_button(button_row, "复制 URL", self.copy_url)
+        self.create_share_button = self._make_button(
+            button_row,
+            "创建可撤销分享",
+            self.create_share,
+        )
+        self.revoke_share_button = self._make_button(
+            button_row,
+            "停止分享",
+            self.revoke_share,
+        )
+        self.copy_share_button = self._make_button(
+            button_row,
+            "复制分享链接",
+            self.copy_share_url,
+        )
 
         self.upload_button.grid(row=0, column=0, padx=(0, 8), pady=(0, 8))
         self.download_button.grid(row=0, column=1, padx=(0, 8), pady=(0, 8))
         self.delete_button.grid(row=0, column=2, padx=(0, 8), pady=(0, 8))
         self.set_expire_button.grid(row=0, column=3, padx=(0, 8), pady=(0, 8))
         self.url_button.grid(row=0, column=4, padx=(0, 8), pady=(0, 8))
-        self.copy_url_button.grid(row=0, column=5, pady=(0, 8))
+        self.copy_url_button.grid(row=0, column=5, padx=(0, 8), pady=(0, 8))
+        self.create_share_button.grid(row=0, column=6, padx=(0, 8), pady=(0, 8))
+        self.revoke_share_button.grid(row=0, column=7, padx=(0, 8), pady=(0, 8))
+        self.copy_share_button.grid(row=0, column=8, pady=(0, 8))
 
         ttk.Label(action_frame, text="当前选中文件有效预签名 URL").grid(
             row=1, column=0, sticky="w", pady=(4, 4)
@@ -170,7 +215,13 @@ class R2GuiApp:
         ttk.Entry(action_frame, textvariable=self.url_var).grid(
             row=2, column=0, sticky="ew", pady=(0, 8)
         )
-        ttk.Label(action_frame, textvariable=self.status_var).grid(row=3, column=0, sticky="w")
+        ttk.Label(action_frame, text="当前选中文件有效分享链接").grid(
+            row=3, column=0, sticky="w", pady=(4, 4)
+        )
+        ttk.Entry(action_frame, textvariable=self.share_url_var).grid(
+            row=4, column=0, sticky="ew", pady=(0, 8)
+        )
+        ttk.Label(action_frame, textvariable=self.status_var).grid(row=5, column=0, sticky="w")
 
     def _add_labeled_entry(
         self,
@@ -214,6 +265,8 @@ class R2GuiApp:
             "access_key_id": self.access_key_var.get().strip(),
             "secret_access_key": self.secret_key_var.get().strip(),
             "endpoint_url": self.endpoint_var.get().strip(),
+            "worker_base_url": self.worker_base_url_var.get().strip(),
+            "worker_admin_token": self.worker_admin_token_var.get().strip(),
             "default_bucket": self.bucket_var.get().strip(),
             "url_expire_seconds": self.expire_var.get().strip(),
             "recent_buckets": list(self.bucket_combo["values"]),
@@ -227,17 +280,26 @@ class R2GuiApp:
             "access_key_id": "Access Key ID",
             "secret_access_key": "Secret Access Key",
         }
-        missing = [label for key, label in required_fields.items() if not str(config[key]).strip()]
+        missing = [
+            label for key, label in required_fields.items() if not str(config[key]).strip()
+        ]
         if missing:
             messagebox.showerror("配置不完整", f"请先填写以下字段：{', '.join(missing)}")
             return None
 
         endpoint_url = str(config["endpoint_url"]).strip()
         if not endpoint_url:
-            endpoint_url = f'https://{str(config["account_id"]).strip()}.r2.cloudflarestorage.com'
+            endpoint_url = (
+                f'https://{str(config["account_id"]).strip()}.r2.cloudflarestorage.com'
+            )
             self.endpoint_var.set(endpoint_url)
             config["endpoint_url"] = endpoint_url
-        return {key: str(value) for key, value in config.items() if key != "object_url_settings"}
+
+        return {
+            key: str(value)
+            for key, value in config.items()
+            if key != "object_url_settings"
+        }
 
     def _get_selected_keys(self) -> list[str]:
         keys: list[str] = []
@@ -257,6 +319,7 @@ class R2GuiApp:
         config = self._validate_connection_fields()
         if not config:
             return None
+
         credentials = R2Credentials(
             account_id=config["account_id"],
             access_key_id=config["access_key_id"],
@@ -264,6 +327,23 @@ class R2GuiApp:
             endpoint_url=config["endpoint_url"],
         )
         return R2Manager(credentials)
+
+    def _make_worker_client(self) -> WorkerClient | None:
+        worker_base_url = self.worker_base_url_var.get().strip()
+        worker_admin_token = self.worker_admin_token_var.get().strip()
+
+        if not worker_base_url:
+            messagebox.showerror("缺少 Worker 配置", "请先填写 Worker Base URL。")
+            return None
+        if not worker_admin_token:
+            messagebox.showerror("缺少 Worker 配置", "请先填写 Worker Admin Token。")
+            return None
+
+        try:
+            return WorkerClient(worker_base_url, worker_admin_token)
+        except WorkerClientError as exc:
+            messagebox.showerror("Worker 配置错误", str(exc))
+            return None
 
     def _set_status(self, message: str) -> None:
         self.status_var.set(message)
@@ -420,11 +500,13 @@ class R2GuiApp:
         if not object_key:
             return
 
+        object_key = object_key.strip()
+
         def task() -> None:
-            manager.upload_file(bucket, local_path, object_key.strip())
+            manager.upload_file(bucket, local_path, object_key)
 
         def on_success(_: None) -> None:
-            messagebox.showinfo("上传成功", f"文件已上传到 {bucket}/{object_key.strip()}。")
+            messagebox.showinfo("上传成功", f"文件已上传到 {bucket}/{object_key}。")
             self.refresh_objects()
 
         self._run_in_thread("正在上传文件...", task, on_success)
@@ -495,7 +577,7 @@ class R2GuiApp:
         def on_success(result: dict[str, object]) -> None:
             deleted_keys = list(result.get("deleted", []))
             deleted_count = len(deleted_keys)
-            errors = result.get("errors", [])
+            errors = list(result.get("errors", []))
             self._remove_object_records(bucket, deleted_keys)
             if errors:
                 messagebox.showwarning(
@@ -522,7 +604,7 @@ class R2GuiApp:
         current_seconds = self._get_file_expire_seconds(bucket, object_key)
         expire_seconds = simpledialog.askinteger(
             "设置过期秒数",
-            "请输入该文件默认的预签名 URL 过期秒数：",
+            "请输入该文件默认的过期秒数：",
             initialvalue=current_seconds,
             minvalue=1,
             parent=self.root,
@@ -580,10 +662,100 @@ class R2GuiApp:
             self.root.clipboard_clear()
             self.root.clipboard_append(str(result["url"]))
             self._apply_search_filter()
-            self._sync_bottom_url_from_selection()
-            messagebox.showinfo("URL 已生成", "预签名 URL 已生成，并已复制到剪贴板。")
+            self._sync_bottom_links_from_selection()
+            messagebox.showinfo(
+                "URL 已生成",
+                "预签名 URL 已生成，并已复制到剪贴板。",
+            )
 
         self._run_in_thread("正在生成预签名 URL...", task, on_success)
+
+    def create_share(self) -> None:
+        worker_client = self._make_worker_client()
+        if not worker_client:
+            return
+
+        bucket = self.bucket_var.get().strip()
+        object_key = self._get_selected_single_key()
+        if not bucket:
+            messagebox.showerror("缺少 Bucket", "请先选择一个 bucket。")
+            return
+        if object_key is None:
+            messagebox.showwarning("选择数量不正确", "请只选择一个对象来创建分享。")
+            return
+
+        expire_seconds = self._get_file_expire_seconds(bucket, object_key)
+
+        def task() -> dict[str, object]:
+            return worker_client.create_share(bucket, object_key, expire_seconds)
+
+        def on_success(result: dict[str, object]) -> None:
+            share_url = str(result.get("share_url", "")).strip()
+            token = str(result.get("token", "")).strip()
+            status = str(result.get("status", "active")).strip().lower() or "active"
+            created_at = str(result.get("created_at", "")).strip()
+            expires_at = str(result.get("expires_at", "")).strip()
+
+            self._update_object_record(
+                bucket,
+                object_key,
+                {
+                    "default_expire_seconds": expire_seconds,
+                    "last_share_token": token,
+                    "last_share_url": share_url,
+                    "last_share_status": status,
+                    "last_share_created_at": created_at,
+                    "last_share_expires_at": expires_at,
+                },
+            )
+            self.share_url_var.set(share_url)
+            if share_url:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(share_url)
+            self._apply_search_filter()
+            self._sync_bottom_links_from_selection()
+            messagebox.showinfo(
+                "分享链接已创建",
+                "可撤销分享链接已创建，并已复制到剪贴板。",
+            )
+
+        self._run_in_thread("正在创建可撤销分享...", task, on_success)
+
+    def revoke_share(self) -> None:
+        worker_client = self._make_worker_client()
+        if not worker_client:
+            return
+
+        bucket = self.bucket_var.get().strip()
+        object_key = self._get_selected_single_key()
+        if not bucket:
+            messagebox.showerror("缺少 Bucket", "请先选择一个 bucket。")
+            return
+        if object_key is None:
+            messagebox.showwarning("选择数量不正确", "请只选择一个对象来停止分享。")
+            return
+
+        record = self._get_object_record(bucket, object_key)
+        token = self._get_share_token_for_revoke(record)
+        if not token:
+            messagebox.showwarning("没有可停止的分享", "当前选中的文件没有有效分享记录。")
+            return
+
+        def task() -> dict[str, object]:
+            return worker_client.revoke_share(token)
+
+        def on_success(result: dict[str, object]) -> None:
+            share_status = str(result.get("status", "revoked")).strip().lower() or "revoked"
+            self._update_object_record(
+                bucket,
+                object_key,
+                {"last_share_status": share_status},
+            )
+            self._apply_search_filter()
+            self._sync_bottom_links_from_selection()
+            messagebox.showinfo("分享已停止", "当前文件的可撤销分享已停止。")
+
+        self._run_in_thread("正在停止分享...", task, on_success)
 
     def copy_url(self) -> None:
         url = self.url_var.get().strip()
@@ -592,13 +764,22 @@ class R2GuiApp:
             return
         self.root.clipboard_clear()
         self.root.clipboard_append(url)
-        self._set_status("URL 已复制到剪贴板")
+        self._set_status("预签名 URL 已复制到剪贴板")
+
+    def copy_share_url(self) -> None:
+        share_url = self.share_url_var.get().strip()
+        if not share_url:
+            messagebox.showwarning("没有可复制的分享链接", "当前选中的文件没有有效分享链接。")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(share_url)
+        self._set_status("分享链接已复制到剪贴板")
 
     def _on_search_change(self, *_args) -> None:
         self._apply_search_filter()
 
     def _on_tree_selection_change(self, *_args) -> None:
-        self._sync_bottom_url_from_selection()
+        self._sync_bottom_links_from_selection()
 
     def _apply_search_filter(self) -> None:
         keyword = self.search_var.get().strip().lower()
@@ -609,7 +790,7 @@ class R2GuiApp:
                 item for item in self.all_objects if keyword in str(item["key"]).lower()
             ]
         self._refresh_tree()
-        self._sync_bottom_url_from_selection()
+        self._sync_bottom_links_from_selection()
 
     def _refresh_tree(self) -> None:
         bucket = self.bucket_var.get().strip()
@@ -745,13 +926,46 @@ class R2GuiApp:
 
         return url
 
-    def _sync_bottom_url_from_selection(self) -> None:
+    def _get_valid_share_url(self, bucket: str, object_key: str) -> str:
+        record = self._get_object_record(bucket, object_key)
+        if not self._has_active_share_record(record):
+            return ""
+        return str(record.get("last_share_url", "")).strip()
+
+    def _has_active_share_record(self, record: dict[str, object] | None) -> bool:
+        if not record:
+            return False
+
+        status = str(record.get("last_share_status", "")).strip().lower()
+        if status != "active":
+            return False
+
+        share_url = str(record.get("last_share_url", "")).strip()
+        token = str(record.get("last_share_token", "")).strip()
+        if not share_url or not token:
+            return False
+
+        expires_at = self._parse_datetime(str(record.get("last_share_expires_at", "")))
+        if expires_at is None:
+            return False
+
+        return datetime.now().astimezone() < expires_at
+
+    def _get_share_token_for_revoke(self, record: dict[str, object] | None) -> str:
+        if not self._has_active_share_record(record):
+            return ""
+        return str(record.get("last_share_token", "")).strip()
+
+    def _sync_bottom_links_from_selection(self) -> None:
         bucket = self.bucket_var.get().strip()
         object_key = self._get_selected_single_key()
         if not bucket or object_key is None:
             self.url_var.set("")
+            self.share_url_var.set("")
             return
+
         self.url_var.set(self._get_valid_historical_url(bucket, object_key))
+        self.share_url_var.set(self._get_valid_share_url(bucket, object_key))
 
     def _parse_datetime(self, value: str) -> datetime | None:
         if not value:
@@ -795,5 +1009,5 @@ class R2GuiApp:
     def _refresh_countdown_timer(self) -> None:
         if self.filtered_objects:
             self._refresh_tree()
-            self._sync_bottom_url_from_selection()
+            self._sync_bottom_links_from_selection()
         self.root.after(self.COUNTDOWN_REFRESH_MS, self._refresh_countdown_timer)

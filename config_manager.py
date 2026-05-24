@@ -15,6 +15,8 @@ def get_default_config() -> dict[str, Any]:
         "access_key_id": "",
         "secret_access_key": "",
         "endpoint_url": "",
+        "worker_base_url": "",
+        "worker_admin_token": "",
         "default_bucket": "",
         "url_expire_seconds": 3600,
         "recent_buckets": [],
@@ -30,6 +32,8 @@ def _clean_config(raw: dict[str, Any]) -> dict[str, Any]:
     config["access_key_id"] = str(config.get("access_key_id", "")).strip()
     config["secret_access_key"] = str(config.get("secret_access_key", "")).strip()
     config["endpoint_url"] = str(config.get("endpoint_url", "")).strip()
+    config["worker_base_url"] = str(config.get("worker_base_url", "")).strip()
+    config["worker_admin_token"] = str(config.get("worker_admin_token", "")).strip()
     config["default_bucket"] = str(config.get("default_bucket", "")).strip()
 
     try:
@@ -83,6 +87,21 @@ def _clean_object_url_settings(raw: dict[str, Any]) -> dict[str, dict[str, dict[
                 "last_expires_at": str(
                     object_settings.get("last_expires_at", "")
                 ).strip(),
+                "last_share_token": str(
+                    object_settings.get("last_share_token", "")
+                ).strip(),
+                "last_share_url": str(
+                    object_settings.get("last_share_url", "")
+                ).strip(),
+                "last_share_status": _clean_share_status(
+                    object_settings.get("last_share_status", "")
+                ),
+                "last_share_created_at": str(
+                    object_settings.get("last_share_created_at", "")
+                ).strip(),
+                "last_share_expires_at": str(
+                    object_settings.get("last_share_expires_at", "")
+                ).strip(),
             }
 
         cleaned[bucket_key] = cleaned_bucket
@@ -108,3 +127,10 @@ def save_config(config: dict[str, Any]) -> None:
     cleaned = _clean_config(config)
     with CONFIG_PATH.open("w", encoding="utf-8") as file:
         json.dump(cleaned, file, ensure_ascii=False, indent=2)
+
+
+def _clean_share_status(value: Any) -> str:
+    normalized = str(value).strip().lower()
+    if normalized in {"active", "revoked"}:
+        return normalized
+    return ""

@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "noteshare-share-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-24",
+
+  // 部署前请替换为你自己的 KV Namespace ID
+  "kv_namespaces": [
+    {
+      "binding": "SHARES",
+      "id": "YOUR_KV_NAMESPACE_ID",
+      "preview_id": "YOUR_KV_PREVIEW_NAMESPACE_ID"
+    }
+  ],
+
+  // 部署前请替换为你自己的 R2 bucket 名称
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "YOUR_R2_BUCKET_NAME"
+    }
+  ],
+
+  "vars": {
+    "R2_BUCKET_NAME": "YOUR_R2_BUCKET_NAME"
+  }
+}
