@@ -4,7 +4,7 @@ import queue
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import END, StringVar, Tk, filedialog, messagebox, simpledialog, ttk
+from tkinter import END, Canvas, StringVar, Tk, filedialog, messagebox, simpledialog, ttk
 
 from config_manager import load_config, save_config
 from r2_client import R2Credentials, R2Manager
@@ -13,6 +13,11 @@ from worker_client import WorkerClient, WorkerClientError
 
 class R2GuiApp:
     COUNTDOWN_REFRESH_MS = 5000
+    STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024
+    STORAGE_RING_SIZE = 118
+    STORAGE_RING_THICKNESS = 12
+    STORAGE_PANEL_MIN_WIDTH = 190
+    STORAGE_TEXT_WRAP = 170
 
     def __init__(self, root: Tk) -> None:
         self.root = root
@@ -44,11 +49,23 @@ class R2GuiApp:
         self.search_var = StringVar()
         self.url_var = StringVar()
         self.share_url_var = StringVar()
+        self.storage_bucket_var = StringVar(value="当前 bucket：未选择")
+        self.storage_usage_var = StringVar(
+            value=f"已用空间：0 B / {self._format_size(self.STORAGE_LIMIT_BYTES)}"
+        )
+        self.storage_percent_var = StringVar(value="已用比例：0.0%")
+        self.storage_total_hint_var = StringVar(value="所有 bucket 合计：暂未统计")
         self.status_var = StringVar(value="就绪")
+
+        self.current_capacity_bucket = ""
+        self.current_capacity_total_bytes = 0
+        self.current_capacity_sizes: dict[str, int] = {}
+        self.current_capacity_loaded = False
 
         self._build_layout()
         self._load_bucket_options_from_config()
         self.search_var.trace_add("write", self._on_search_change)
+        self.bucket_var.trace_add("write", self._on_bucket_change)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_selection_change)
         self.root.after(200, self._auto_refresh_on_startup)
         self.root.after(100, self._process_ui_queue)
@@ -128,7 +145,62 @@ class R2GuiApp:
         list_frame = ttk.LabelFrame(container, text="对象列表", padding=12)
         list_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
         list_frame.columnconfigure(0, weight=1)
+        list_frame.columnconfigure(1, minsize=self.STORAGE_PANEL_MIN_WIDTH)
         list_frame.rowconfigure(0, weight=1)
+
+        tree_frame = ttk.Frame(list_frame)
+        tree_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        summary_frame = ttk.Frame(list_frame, padding=(4, 4, 4, 4))
+        summary_frame.grid(row=0, column=1, sticky="ns")
+        summary_frame.columnconfigure(0, weight=1)
+
+        ring_frame = ttk.Frame(summary_frame)
+        ring_frame.grid(row=0, column=0, sticky="ew")
+        ring_frame.columnconfigure(0, weight=1)
+        self.storage_canvas = Canvas(
+            ring_frame,
+            width=self.STORAGE_RING_SIZE,
+            height=self.STORAGE_RING_SIZE,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.storage_canvas.grid(row=0, column=0, sticky="n", pady=(0, 8))
+
+        summary_text_frame = ttk.Frame(summary_frame)
+        summary_text_frame.grid(row=1, column=0, sticky="nsew")
+        summary_text_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            summary_text_frame,
+            text="Bucket 容量概览",
+            font=("Segoe UI", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            summary_text_frame,
+            textvariable=self.storage_bucket_var,
+            wraplength=self.STORAGE_TEXT_WRAP,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(
+            summary_text_frame,
+            textvariable=self.storage_usage_var,
+            wraplength=self.STORAGE_TEXT_WRAP,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(
+            summary_text_frame,
+            textvariable=self.storage_percent_var,
+            wraplength=self.STORAGE_TEXT_WRAP,
+            justify="left",
+        ).grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(
+            summary_text_frame,
+            textvariable=self.storage_total_hint_var,
+            wraplength=self.STORAGE_TEXT_WRAP,
+            justify="left",
+        ).grid(row=4, column=0, sticky="w", pady=(4, 0))
 
         columns = (
             "key",
@@ -139,7 +211,7 @@ class R2GuiApp:
             "url_expiry_status",
         )
         self.tree = ttk.Treeview(
-            list_frame,
+            tree_frame,
             columns=columns,
             show="headings",
             selectmode="extended",
@@ -157,8 +229,8 @@ class R2GuiApp:
         self.tree.column("default_expire_seconds", width=130, anchor="center")
         self.tree.column("url_expiry_status", width=260, anchor="w")
 
-        scrollbar_y = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
-        scrollbar_x = ttk.Scrollbar(list_frame, orient="horizontal", command=self.tree.xview)
+        scrollbar_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        scrollbar_x = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=scrollbar_y.set, xscrollcommand=scrollbar_x.set)
 
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -225,6 +297,143 @@ class R2GuiApp:
             row=4, column=0, sticky="ew", pady=(0, 8)
         )
         ttk.Label(action_frame, textvariable=self.status_var).grid(row=5, column=0, sticky="w")
+        self._refresh_storage_summary(reset_loaded_state=True)
+
+    def _on_bucket_change(self, *_args) -> None:
+        self._refresh_storage_summary(reset_loaded_state=True)
+
+    def _refresh_storage_summary(self, reset_loaded_state: bool = False) -> None:
+        bucket = self.bucket_var.get().strip()
+        if reset_loaded_state:
+            self.current_capacity_bucket = bucket
+            self.current_capacity_total_bytes = 0
+            self.current_capacity_sizes = {}
+            self.current_capacity_loaded = False
+
+        display_bucket = bucket or "未选择"
+        if self.current_capacity_loaded and self.current_capacity_bucket == bucket:
+            used_bytes = self.current_capacity_total_bytes
+        else:
+            used_bytes = 0
+
+        self.storage_bucket_var.set(f"当前 bucket：{display_bucket}")
+        self.storage_usage_var.set(
+            f"已用空间：{self._format_size(used_bytes)} / "
+            f"{self._format_size(self.STORAGE_LIMIT_BYTES)}"
+        )
+
+        percent = 0.0
+        if self.STORAGE_LIMIT_BYTES > 0:
+            percent = (used_bytes / self.STORAGE_LIMIT_BYTES) * 100
+        self.storage_percent_var.set(f"已用比例：{percent:.1f}%")
+        self._draw_storage_ring(used_bytes)
+
+    def _set_storage_snapshot(self, bucket: str, objects: list[dict[str, object]]) -> None:
+        self.current_capacity_bucket = bucket
+        self.current_capacity_sizes = self._build_object_size_index(objects)
+        self.current_capacity_total_bytes = sum(self.current_capacity_sizes.values())
+        self.current_capacity_loaded = True
+        self._refresh_storage_summary()
+
+    def _build_object_size_index(
+        self,
+        objects: list[dict[str, object]],
+    ) -> dict[str, int]:
+        size_index: dict[str, int] = {}
+        for item in objects:
+            key = str(item.get("key", "")).strip()
+            if not key:
+                continue
+            size_index[key] = self._coerce_object_size(item.get("size", 0))
+        return size_index
+
+    def _coerce_object_size(self, value: object) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def _apply_storage_upload_update(
+        self,
+        bucket: str,
+        object_key: str,
+        local_path: str,
+    ) -> None:
+        if not self.current_capacity_loaded or self.current_capacity_bucket != bucket:
+            return
+
+        try:
+            new_size = max(0, Path(local_path).stat().st_size)
+        except OSError:
+            return
+
+        old_size = self.current_capacity_sizes.get(object_key, 0)
+        self.current_capacity_sizes[object_key] = new_size
+        self.current_capacity_total_bytes = max(
+            0,
+            self.current_capacity_total_bytes + new_size - old_size,
+        )
+        self._refresh_storage_summary()
+
+    def _apply_storage_delete_update(self, bucket: str, object_keys: list[str]) -> None:
+        if not self.current_capacity_loaded or self.current_capacity_bucket != bucket:
+            return
+
+        removed_bytes = 0
+        for object_key in object_keys:
+            removed_bytes += self.current_capacity_sizes.pop(object_key, 0)
+
+        self.current_capacity_total_bytes = max(
+            0,
+            self.current_capacity_total_bytes - removed_bytes,
+        )
+        self._refresh_storage_summary()
+
+    def _draw_storage_ring(self, used_bytes: int) -> None:
+        canvas = self.storage_canvas
+        canvas.delete("all")
+
+        size = self.STORAGE_RING_SIZE
+        padding = 14
+        thickness = self.STORAGE_RING_THICKNESS
+        extent_ratio = 0.0
+        if self.STORAGE_LIMIT_BYTES > 0:
+            extent_ratio = min(1.0, used_bytes / self.STORAGE_LIMIT_BYTES)
+        extent = -360 * extent_ratio
+
+        canvas.create_oval(
+            padding,
+            padding,
+            size - padding,
+            size - padding,
+            outline="#d8dee9",
+            width=thickness,
+        )
+        canvas.create_arc(
+            padding,
+            padding,
+            size - padding,
+            size - padding,
+            start=90,
+            extent=extent,
+            style="arc",
+            outline="#2a9d8f",
+            width=thickness,
+        )
+        canvas.create_text(
+            size / 2,
+            (size / 2) - 8,
+            text=self._format_size(used_bytes),
+            fill="#233142",
+            font=("Segoe UI", 10, "bold"),
+        )
+        canvas.create_text(
+            size / 2,
+            (size / 2) + 12,
+            text=f"/ {self._format_size(self.STORAGE_LIMIT_BYTES)}",
+            fill="#5c6773",
+            font=("Segoe UI", 8),
+        )
 
     def _add_labeled_entry(
         self,
@@ -480,13 +689,23 @@ class R2GuiApp:
 
         prefix = self.prefix_var.get().strip()
 
-        def task() -> list[dict[str, object]]:
-            return manager.list_objects(bucket, prefix)
+        def task() -> dict[str, object]:
+            visible_objects = manager.list_objects(bucket, prefix)
+            storage_objects = visible_objects
+            if prefix:
+                storage_objects = manager.list_objects(bucket, "")
+            return {
+                "visible_objects": visible_objects,
+                "storage_objects": storage_objects,
+            }
 
-        def on_success(objects: list[dict[str, object]]) -> None:
-            self.all_objects = objects
+        def on_success(result: dict[str, object]) -> None:
+            visible_objects = list(result.get("visible_objects", []))
+            storage_objects = list(result.get("storage_objects", visible_objects))
+            self.all_objects = visible_objects
+            self._set_storage_snapshot(bucket, storage_objects)
             self._apply_search_filter()
-            self._set_status(f"已加载 {len(objects)} 个对象")
+            self._set_status(f"已加载 {len(visible_objects)} 个对象")
 
         def on_error(exc: Exception) -> None:
             self._set_buttons_state(False)
@@ -532,6 +751,7 @@ class R2GuiApp:
             manager.upload_file(bucket, local_path, object_key)
 
         def on_success(_: None) -> None:
+            self._apply_storage_upload_update(bucket, object_key, local_path)
             messagebox.showinfo("上传成功", f"文件已上传到 {bucket}/{object_key}。")
             self.refresh_objects()
 
@@ -605,6 +825,7 @@ class R2GuiApp:
             deleted_count = len(deleted_keys)
             errors = list(result.get("errors", []))
             self._remove_object_records(bucket, deleted_keys)
+            self._apply_storage_delete_update(bucket, deleted_keys)
             if errors:
                 messagebox.showwarning(
                     "删除完成",
