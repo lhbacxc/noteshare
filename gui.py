@@ -18,6 +18,9 @@ class R2GuiApp:
     STORAGE_RING_THICKNESS = 12
     STORAGE_PANEL_MIN_WIDTH = 190
     STORAGE_TEXT_WRAP = 170
+    STORAGE_RING_BASE_COLOR = "#e6ebf2"
+    STORAGE_RING_USED_COLOR = "#2a9d8f"
+    STORAGE_RING_MIN_VISIBLE_EXTENT = 1.0
 
     def __init__(self, root: Tk) -> None:
         self.root = root
@@ -325,7 +328,9 @@ class R2GuiApp:
         percent = 0.0
         if self.STORAGE_LIMIT_BYTES > 0:
             percent = (used_bytes / self.STORAGE_LIMIT_BYTES) * 100
-        self.storage_percent_var.set(f"已用比例：{percent:.1f}%")
+        self.storage_percent_var.set(
+            f"已用比例：{self._format_storage_percent(percent, used_bytes)}"
+        )
         self._draw_storage_ring(used_bytes)
 
     def _set_storage_snapshot(self, bucket: str, objects: list[dict[str, object]]) -> None:
@@ -352,6 +357,13 @@ class R2GuiApp:
             return max(0, int(value))
         except (TypeError, ValueError):
             return 0
+
+    def _format_storage_percent(self, percent: float, used_bytes: int) -> str:
+        if used_bytes <= 0:
+            return "0.0%"
+        if 0 < percent < 0.1:
+            return "<0.1%"
+        return f"{percent:.1f}%"
 
     def _apply_storage_upload_update(
         self,
@@ -399,27 +411,30 @@ class R2GuiApp:
         extent_ratio = 0.0
         if self.STORAGE_LIMIT_BYTES > 0:
             extent_ratio = min(1.0, used_bytes / self.STORAGE_LIMIT_BYTES)
-        extent = -360 * extent_ratio
+        used_extent = min(359.999, 360 * extent_ratio)
 
         canvas.create_oval(
             padding,
             padding,
             size - padding,
             size - padding,
-            outline="#d8dee9",
+            outline=self.STORAGE_RING_BASE_COLOR,
             width=thickness,
         )
-        canvas.create_arc(
-            padding,
-            padding,
-            size - padding,
-            size - padding,
-            start=90,
-            extent=extent,
-            style="arc",
-            outline="#2a9d8f",
-            width=thickness,
-        )
+        # Very small extents can be rendered by Tk as a full colored ring.
+        # Skip sub-degree arcs and let the text communicate the tiny usage.
+        if used_extent >= self.STORAGE_RING_MIN_VISIBLE_EXTENT:
+            canvas.create_arc(
+                padding,
+                padding,
+                size - padding,
+                size - padding,
+                start=90,
+                extent=used_extent,
+                style="arc",
+                outline=self.STORAGE_RING_USED_COLOR,
+                width=thickness,
+            )
         canvas.create_text(
             size / 2,
             (size / 2) - 8,
