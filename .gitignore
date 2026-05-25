@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 config.json
+build/
+dist/config.json
 .wrangler/
 worker/node_modules/
 worker/.wrangler/
