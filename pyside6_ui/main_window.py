@@ -8,6 +8,7 @@ from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSizePolicy,
+    QScrollArea,
     QSplitter,
     QStatusBar,
     QVBoxLayout,
@@ -31,12 +33,14 @@ from pyside6_ui.theme import (
     APP_STYLESHEET,
     AUTO_REFRESH_DELAY_MS,
     COUNTDOWN_REFRESH_MS,
+    RESPONSIVE_VERTICAL_SPLIT_WIDTH,
     STORAGE_LIMIT_BYTES,
     WINDOW_DEFAULT_HEIGHT,
     WINDOW_DEFAULT_WIDTH,
     WINDOW_MIN_HEIGHT,
     WINDOW_MIN_WIDTH,
 )
+from pyside6_ui.widgets.collapsible_section import CollapsibleSection
 from pyside6_ui.widgets.detail_panel import DetailPanel
 from pyside6_ui.widgets.object_table import ObjectTableWidget
 from r2_client import R2Credentials, R2Manager
@@ -73,15 +77,18 @@ class NoteShareMainWindow(QMainWindow):
         self.countdown_timer.start(COUNTDOWN_REFRESH_MS)
 
     def _build_ui(self) -> None:
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+
         central = QWidget()
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(16, 16, 16, 16)
         root_layout.setSpacing(14)
 
-        config_card = QGroupBox("连接配置")
-        config_card.setObjectName("SurfaceCard")
-        config_layout = QGridLayout(config_card)
-        config_layout.setContentsMargins(16, 18, 16, 16)
+        self.config_section = CollapsibleSection("连接配置")
+        config_layout = QGridLayout()
+        config_layout.setContentsMargins(0, 0, 0, 0)
         config_layout.setHorizontalSpacing(12)
         config_layout.setVerticalSpacing(10)
 
@@ -96,45 +103,52 @@ class NoteShareMainWindow(QMainWindow):
         self.bucket_combo.setEditable(True)
         self.bucket_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        self._add_form_field(config_layout, "Account ID", self.account_id_edit, 0, 0)
-        self._add_form_field(config_layout, "Access Key ID", self.access_key_edit, 0, 1)
-        self._add_form_field(config_layout, "Secret Access Key", self.secret_key_edit, 0, 2)
-        self._add_form_field(config_layout, "Endpoint URL", self.endpoint_edit, 1, 0)
-        self._add_form_field(config_layout, "默认过期秒数", self.expire_edit, 1, 1)
-        self._add_form_field(config_layout, "Worker Base URL", self.worker_base_url_edit, 1, 2)
-        self._add_form_field(config_layout, "Worker Admin Token", self.worker_admin_token_edit, 2, 0)
-        self._add_form_field(config_layout, "Bucket", self.bucket_combo, 2, 1)
+        self.config_field_wrappers = [
+            self._make_labeled_wrapper("Account ID", self.account_id_edit),
+            self._make_labeled_wrapper("Access Key ID", self.access_key_edit),
+            self._make_labeled_wrapper("Secret Access Key", self.secret_key_edit),
+            self._make_labeled_wrapper("Endpoint URL", self.endpoint_edit),
+            self._make_labeled_wrapper("默认过期秒数", self.expire_edit),
+            self._make_labeled_wrapper("Worker Base URL", self.worker_base_url_edit),
+            self._make_labeled_wrapper("Worker Admin Token", self.worker_admin_token_edit),
+            self._make_labeled_wrapper("Bucket", self.bucket_combo),
+        ]
+        self.config_fields_layout = QGridLayout()
+        self.config_fields_layout.setContentsMargins(0, 0, 0, 0)
+        self.config_fields_layout.setHorizontalSpacing(12)
+        self.config_fields_layout.setVerticalSpacing(10)
 
-        config_actions = QHBoxLayout()
-        config_actions.setSpacing(10)
         self.save_button = self._make_button("保存配置")
         self.test_button = self._make_button("测试连接", primary=True)
         self.load_buckets_button = self._make_button("加载 Bucket")
-        config_actions.addWidget(self.save_button)
-        config_actions.addWidget(self.test_button)
-        config_actions.addWidget(self.load_buckets_button)
-        config_actions.addStretch(1)
-        config_layout.addLayout(config_actions, 5, 0, 1, 3)
+        self.config_action_buttons = [self.save_button, self.test_button, self.load_buckets_button]
+        self.config_actions_layout = QGridLayout()
+        self.config_actions_layout.setContentsMargins(0, 0, 0, 0)
+        self.config_actions_layout.setHorizontalSpacing(10)
+        self.config_actions_layout.setVerticalSpacing(10)
+
+        config_layout.addLayout(self.config_fields_layout, 0, 0)
+        config_layout.addLayout(self.config_actions_layout, 1, 0)
+        self.config_section.set_content_layout(config_layout)
 
         filter_card = QGroupBox("筛选与浏览")
         filter_card.setObjectName("SurfaceCard")
-        filter_layout = QHBoxLayout(filter_card)
-        filter_layout.setContentsMargins(16, 18, 16, 16)
-        filter_layout.setSpacing(12)
+        self.filter_layout = QGridLayout(filter_card)
+        self.filter_layout.setContentsMargins(16, 18, 16, 16)
+        self.filter_layout.setHorizontalSpacing(12)
+        self.filter_layout.setVerticalSpacing(10)
         self.prefix_edit = self._make_line_edit()
         self.search_edit = self._make_line_edit()
         self.refresh_button = self._make_button("刷新列表", primary=True)
-        filter_layout.addWidget(QLabel("前缀"))
-        filter_layout.addWidget(self.prefix_edit, 1)
-        filter_layout.addWidget(QLabel("搜索"))
-        filter_layout.addWidget(self.search_edit, 1)
-        filter_layout.addWidget(self.refresh_button)
+        self.prefix_wrapper = self._make_labeled_wrapper("前缀", self.prefix_edit)
+        self.search_wrapper = self._make_labeled_wrapper("搜索", self.search_edit)
 
         action_card = QGroupBox("对象操作")
         action_card.setObjectName("SurfaceCard")
-        action_layout = QHBoxLayout(action_card)
-        action_layout.setContentsMargins(16, 18, 16, 16)
-        action_layout.setSpacing(10)
+        self.action_layout = QGridLayout(action_card)
+        self.action_layout.setContentsMargins(16, 18, 16, 16)
+        self.action_layout.setHorizontalSpacing(10)
+        self.action_layout.setVerticalSpacing(10)
         self.upload_button = self._make_button("上传文件", primary=True)
         self.download_button = self._make_button("下载选中对象")
         self.delete_button = self._make_button("删除选中对象", danger=True)
@@ -142,7 +156,7 @@ class NoteShareMainWindow(QMainWindow):
         self.generate_url_button = self._make_button("生成预签名 URL")
         self.create_share_button = self._make_button("创建可撤销分享")
         self.revoke_share_button = self._make_button("停止分享", danger=True)
-        for button in [
+        self.object_action_buttons = [
             self.upload_button,
             self.download_button,
             self.delete_button,
@@ -150,12 +164,10 @@ class NoteShareMainWindow(QMainWindow):
             self.generate_url_button,
             self.create_share_button,
             self.revoke_share_button,
-        ]:
-            action_layout.addWidget(button)
-        action_layout.addStretch(1)
+        ]
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.setChildrenCollapsible(False)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setChildrenCollapsible(False)
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
@@ -169,21 +181,29 @@ class NoteShareMainWindow(QMainWindow):
         self.action_buttons.extend(
             [self.detail_panel.copy_url_button, self.detail_panel.copy_share_button]
         )
-        splitter.addWidget(left_panel)
-        splitter.addWidget(self.detail_panel)
-        splitter.setStretchFactor(0, 4)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([930, 360])
+        self.detail_scroll = QScrollArea()
+        self.detail_scroll.setWidgetResizable(True)
+        self.detail_scroll.setFrameShape(QFrame.NoFrame)
+        self.detail_scroll.setWidget(self.detail_panel)
+        self.detail_scroll.setMinimumWidth(250)
+        self.main_splitter.addWidget(left_panel)
+        self.main_splitter.addWidget(self.detail_scroll)
+        self.main_splitter.setStretchFactor(0, 4)
+        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setSizes([820, 320])
 
-        root_layout.addWidget(config_card)
+        root_layout.addWidget(self.config_section)
         root_layout.addWidget(filter_card)
         root_layout.addWidget(action_card)
-        root_layout.addWidget(splitter, 1)
+        root_layout.addWidget(self.main_splitter, 1)
 
-        self.setCentralWidget(central)
+        scroll_area.setWidget(central)
+        self.setCentralWidget(scroll_area)
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
         self._set_status("就绪")
+        self._rebuild_responsive_layouts()
+        self.config_section.set_collapsed(self._should_collapse_config_by_default())
 
     def _wire_events(self) -> None:
         self.save_button.clicked.connect(self.save_current_config)
@@ -223,14 +243,14 @@ class NoteShareMainWindow(QMainWindow):
         self.action_buttons.append(button)
         return button
 
-    def _add_form_field(self, layout: QGridLayout, label: str, widget: QWidget, row: int, column: int) -> None:
+    def _make_labeled_wrapper(self, label: str, widget: QWidget) -> QWidget:
         wrapper = QWidget()
         wrapper_layout = QVBoxLayout(wrapper)
         wrapper_layout.setContentsMargins(0, 0, 0, 0)
         wrapper_layout.setSpacing(6)
         wrapper_layout.addWidget(QLabel(label))
         wrapper_layout.addWidget(widget)
-        layout.addWidget(wrapper, row * 2, column)
+        return wrapper
 
     def _load_config_to_form(self) -> None:
         config = self.state.config_data
@@ -324,6 +344,10 @@ class NoteShareMainWindow(QMainWindow):
     def _set_buttons_state(self, disabled: bool) -> None:
         for button in self.action_buttons:
             button.setDisabled(disabled)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._rebuild_responsive_layouts()
 
     def _run_task(self, status_text: str, task, on_result=None, on_error=None) -> None:
         def handle_error(exc: Exception) -> None:
@@ -1012,3 +1036,85 @@ class NoteShareMainWindow(QMainWindow):
         if self.state.filtered_objects:
             self._refresh_table()
             self._sync_detail_from_selection()
+
+    def _clear_layout(self, layout: QGridLayout) -> None:
+        while layout.count():
+            layout.takeAt(0)
+
+    def _rebuild_responsive_layouts(self) -> None:
+        width = self.width()
+        self._rebuild_config_fields(width)
+        self._rebuild_config_actions(width)
+        self._rebuild_filter_layout(width)
+        self._rebuild_action_layout(width)
+        self._update_splitter_orientation(width)
+
+    def _rebuild_config_fields(self, width: int) -> None:
+        self._clear_layout(self.config_fields_layout)
+        columns = 3 if width >= 1320 else 2 if width >= 980 else 1
+        for index, wrapper in enumerate(self.config_field_wrappers):
+            row = index // columns
+            column = index % columns
+            self.config_fields_layout.addWidget(wrapper, row, column)
+        for column in range(columns):
+            self.config_fields_layout.setColumnStretch(column, 1)
+
+    def _rebuild_config_actions(self, width: int) -> None:
+        self._clear_layout(self.config_actions_layout)
+        columns = 3 if width >= 1120 else 2 if width >= 860 else 1
+        for index, button in enumerate(self.config_action_buttons):
+            row = index // columns
+            column = index % columns
+            self.config_actions_layout.addWidget(button, row, column)
+        for column in range(columns):
+            self.config_actions_layout.setColumnStretch(column, 1)
+
+    def _rebuild_filter_layout(self, width: int) -> None:
+        self._clear_layout(self.filter_layout)
+        if width >= 1120:
+            self.filter_layout.addWidget(self.prefix_wrapper, 0, 0)
+            self.filter_layout.addWidget(self.search_wrapper, 0, 1)
+            self.filter_layout.addWidget(self.refresh_button, 0, 2, alignment=Qt.AlignBottom)
+            self.filter_layout.setColumnStretch(0, 1)
+            self.filter_layout.setColumnStretch(1, 1)
+        elif width >= 860:
+            self.filter_layout.addWidget(self.prefix_wrapper, 0, 0)
+            self.filter_layout.addWidget(self.search_wrapper, 0, 1)
+            self.filter_layout.addWidget(self.refresh_button, 1, 0, 1, 2, alignment=Qt.AlignRight)
+            self.filter_layout.setColumnStretch(0, 1)
+            self.filter_layout.setColumnStretch(1, 1)
+        else:
+            self.filter_layout.addWidget(self.prefix_wrapper, 0, 0)
+            self.filter_layout.addWidget(self.search_wrapper, 1, 0)
+            self.filter_layout.addWidget(self.refresh_button, 2, 0, alignment=Qt.AlignRight)
+            self.filter_layout.setColumnStretch(0, 1)
+
+    def _rebuild_action_layout(self, width: int) -> None:
+        self._clear_layout(self.action_layout)
+        columns = 4 if width >= 1380 else 3 if width >= 1120 else 2 if width >= 860 else 1
+        for index, button in enumerate(self.object_action_buttons):
+            row = index // columns
+            column = index % columns
+            self.action_layout.addWidget(button, row, column)
+        for column in range(columns):
+            self.action_layout.setColumnStretch(column, 1)
+
+    def _update_splitter_orientation(self, width: int) -> None:
+        orientation = Qt.Horizontal if width >= RESPONSIVE_VERTICAL_SPLIT_WIDTH else Qt.Vertical
+        if self.main_splitter.orientation() == orientation:
+            return
+        self.main_splitter.setOrientation(orientation)
+        if orientation == Qt.Horizontal:
+            self.main_splitter.setSizes([820, 320])
+        else:
+            self.main_splitter.setSizes([520, 320])
+
+    def _should_collapse_config_by_default(self) -> bool:
+        config = self.state.config_data
+        required_keys = [
+            "account_id",
+            "access_key_id",
+            "secret_access_key",
+            "endpoint_url",
+        ]
+        return all(str(config.get(key, "")).strip() for key in required_keys)

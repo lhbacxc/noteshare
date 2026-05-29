@@ -14,7 +14,7 @@ class StorageRingWidget(QWidget):
         self._used_color = QColor("#2a9d8f")
         self._text_color = QColor("#233142")
         self._sub_text_color = QColor("#5c6773")
-        self.setMinimumSize(180, 180)
+        self.setMinimumSize(132, 132)
 
     def set_usage(self, used_bytes: int, total_bytes: int) -> None:
         self._used_bytes = max(0, int(used_bytes))

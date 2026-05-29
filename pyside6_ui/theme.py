@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-WINDOW_MIN_WIDTH = 1260
-WINDOW_MIN_HEIGHT = 760
-WINDOW_DEFAULT_WIDTH = 1480
-WINDOW_DEFAULT_HEIGHT = 900
+WINDOW_MIN_WIDTH = 900
+WINDOW_MIN_HEIGHT = 620
+WINDOW_DEFAULT_WIDTH = 1320
+WINDOW_DEFAULT_HEIGHT = 820
 STORAGE_LIMIT_BYTES = 10 * 1024 * 1024 * 1024
 COUNTDOWN_REFRESH_MS = 5000
 AUTO_REFRESH_DELAY_MS = 200
+RESPONSIVE_VERTICAL_SPLIT_WIDTH = 1180
 
 
 APP_STYLESHEET = """
@@ -23,6 +24,18 @@ QFrame#SurfaceCard, QGroupBox#SurfaceCard {
     background: #ffffff;
     border: 1px solid #dde5ef;
     border-radius: 16px;
+}
+QToolButton {
+    background: transparent;
+    border: none;
+    color: #1f2e43;
+    font-size: 18px;
+    font-weight: 700;
+    padding: 2px 0;
+    text-align: left;
+}
+QToolButton:hover {
+    color: #2f7cf6;
 }
 QGroupBox#SurfaceCard {
     margin-top: 10px;
@@ -99,6 +112,10 @@ QTableWidget::item:selected {
 QStatusBar {
     background: #ffffff;
     border-top: 1px solid #dde5ef;
+}
+QScrollArea {
+    border: none;
+    background: transparent;
 }
 QSplitter::handle {
     background: transparent;

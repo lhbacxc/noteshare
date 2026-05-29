@@ -17,6 +17,7 @@ class BackgroundTask(QRunnable):
         super().__init__()
         self.task = task
         self.signals = TaskSignals()
+        self.setAutoDelete(False)
 
     def run(self) -> None:
         self.signals.started.emit()
@@ -33,6 +34,7 @@ class BackgroundTask(QRunnable):
 class TaskRunner:
     def __init__(self) -> None:
         self._pool = QThreadPool.globalInstance()
+        self._active_tasks: list[BackgroundTask] = []
 
     def start(
         self,
@@ -43,12 +45,17 @@ class TaskRunner:
         on_finished: Callable[[], None] | None = None,
     ) -> None:
         runnable = BackgroundTask(task)
+        self._active_tasks.append(runnable)
         if on_started is not None:
             runnable.signals.started.connect(on_started)
         if on_result is not None:
             runnable.signals.result.connect(on_result)
         if on_error is not None:
             runnable.signals.error.connect(on_error)
+        def cleanup() -> None:
+            if runnable in self._active_tasks:
+                self._active_tasks.remove(runnable)
         if on_finished is not None:
             runnable.signals.finished.connect(on_finished)
+        runnable.signals.finished.connect(cleanup)
         self._pool.start(runnable)

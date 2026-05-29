@@ -1,16 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QFormLayout, QGroupBox, QLabel, QLineEdit, QPushButton, QVBoxLayout, QWidget
 
 from pyside6_ui.theme import STORAGE_LIMIT_BYTES
 from pyside6_ui.widgets.storage_ring import StorageRingWidget
@@ -56,20 +47,15 @@ class DetailPanel(QWidget):
         self.share_edit = QLineEdit()
         self.share_edit.setReadOnly(True)
 
-        url_row = QHBoxLayout()
-        url_row.addWidget(self.url_edit, 1)
         self.copy_url_button = QPushButton("复制 URL")
-        url_row.addWidget(self.copy_url_button)
-
-        share_row = QHBoxLayout()
-        share_row.addWidget(self.share_edit, 1)
         self.copy_share_button = QPushButton("复制分享链接")
-        share_row.addWidget(self.copy_share_button)
 
         url_layout.addWidget(QLabel("当前有效预签名 URL"))
-        url_layout.addLayout(url_row)
+        url_layout.addWidget(self.url_edit)
+        url_layout.addWidget(self.copy_url_button, alignment=Qt.AlignRight)
         url_layout.addWidget(QLabel("当前有效分享链接"))
-        url_layout.addLayout(share_row)
+        url_layout.addWidget(self.share_edit)
+        url_layout.addWidget(self.copy_share_button, alignment=Qt.AlignRight)
 
         self.storage_card = QGroupBox("Bucket 容量概览")
         self.storage_card.setObjectName("SurfaceCard")
