@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from tkinter import Tk
 
-from gui import R2GuiApp
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QApplication
+
+from pyside6_ui.main_window import NoteShareMainWindow
 
 
 def _resolve_runtime_path(relative_path: str) -> Path:
@@ -16,15 +18,15 @@ def _resolve_runtime_path(relative_path: str) -> Path:
 
 
 def main() -> None:
-    root = Tk()
+    app = QApplication(sys.argv)
+    app.setApplicationName("NoteShare R2 管理工具")
     icon_path = _resolve_runtime_path("cf_cloud.ico")
     if icon_path.exists():
-        try:
-            root.iconbitmap(default=str(icon_path))
-        except Exception:
-            pass
-    R2GuiApp(root)
-    root.mainloop()
+        app.setWindowIcon(QIcon(str(icon_path)))
+
+    window = NoteShareMainWindow(icon_path=icon_path)
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

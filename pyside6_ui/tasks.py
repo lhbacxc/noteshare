@@ -20,15 +20,21 @@ class BackgroundTask(QRunnable):
         self.setAutoDelete(False)
 
     def run(self) -> None:
-        self.signals.started.emit()
+        self._safe_emit(self.signals.started)
         try:
             result = self.task()
         except Exception as exc:  # noqa: BLE001
-            self.signals.error.emit(exc)
+            self._safe_emit(self.signals.error, exc)
         else:
-            self.signals.result.emit(result)
+            self._safe_emit(self.signals.result, result)
         finally:
-            self.signals.finished.emit()
+            self._safe_emit(self.signals.finished)
+
+    def _safe_emit(self, signal, *args: Any) -> None:
+        try:
+            signal.emit(*args)
+        except RuntimeError:
+            return
 
 
 class TaskRunner:

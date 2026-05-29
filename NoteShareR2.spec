@@ -10,8 +10,6 @@ PINNED_DLL_NAMES = (
     "libssl-3-x64.dll",
     "libcrypto-3-x64.dll",
     "libexpat.dll",
-    "tcl86t.dll",
-    "tk86t.dll",
 )
 PINNED_BINARY_INPUTS = []
 PINNED_BINARY_TOCS = []
@@ -30,7 +28,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['tkinter'],
     noarchive=False,
     optimize=0,
 )
