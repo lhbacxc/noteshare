@@ -5,6 +5,7 @@ from typing import Callable
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
     QHeaderView,
     QTableWidget,
     QTableWidgetItem,
@@ -36,13 +37,15 @@ class ObjectTableWidget(QTableWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(0, len(self.HEADERS), parent)
         self.setHorizontalHeaderLabels(self.HEADERS)
+        self.setObjectName("ObjectTable")
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setAlternatingRowColors(True)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setSortingEnabled(True)
+        self.setFrameShape(QFrame.NoFrame)
         self.verticalHeader().setVisible(False)
-        self.verticalHeader().setDefaultSectionSize(40)
+        self.verticalHeader().setDefaultSectionSize(44)
         header = self.horizontalHeader()
         header.setSortIndicatorShown(True)
         header.setSectionsClickable(True)
@@ -53,6 +56,9 @@ class ObjectTableWidget(QTableWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.Stretch)
         self.setShowGrid(False)
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setViewportMargins(0, 0, 0, 0)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.sortByColumn(0, Qt.AscendingOrder)
 
     def populate(
