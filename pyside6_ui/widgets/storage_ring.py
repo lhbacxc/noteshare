@@ -10,11 +10,11 @@ class StorageRingWidget(QWidget):
         super().__init__(parent)
         self._used_bytes = 0
         self._total_bytes = 1
-        self._base_color = QColor("#e6ebf2")
-        self._used_color = QColor("#2a9d8f")
-        self._text_color = QColor("#233142")
-        self._sub_text_color = QColor("#5c6773")
-        self.setMinimumSize(132, 132)
+        self._base_color = QColor("#ececf1")
+        self._used_color = QColor("#0066cc")
+        self._text_color = QColor("#1d1d1f")
+        self._sub_text_color = QColor("#6e6e73")
+        self.setMinimumSize(150, 150)
 
     def set_usage(self, used_bytes: int, total_bytes: int) -> None:
         self._used_bytes = max(0, int(used_bytes))
@@ -28,7 +28,8 @@ class StorageRingWidget(QWidget):
 
         margin = 18
         rect = QRectF(margin, margin, self.width() - (margin * 2), self.height() - (margin * 2))
-        pen = QPen(self._base_color, 12)
+
+        pen = QPen(self._base_color, 10)
         painter.setPen(pen)
         painter.drawEllipse(rect)
 
@@ -39,15 +40,15 @@ class StorageRingWidget(QWidget):
             painter.drawArc(rect, 90 * 16, int(-360 * used_ratio * 16))
 
         painter.setPen(self._text_color)
-        font = QFont("Segoe UI", 10)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.drawText(rect.adjusted(0, -10, 0, 0), Qt.AlignCenter, self._format_size(self._used_bytes))
+        title_font = QFont("Microsoft YaHei UI", 11)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.drawText(rect.adjusted(0, -12, 0, 0), Qt.AlignCenter, self._format_size(self._used_bytes))
 
         painter.setPen(self._sub_text_color)
-        sub_font = QFont("Segoe UI", 8)
+        sub_font = QFont("Microsoft YaHei UI", 8)
         painter.setFont(sub_font)
-        sub_rect = QRectF(rect.left(), rect.center().y() + 2, rect.width(), 30)
+        sub_rect = QRectF(rect.left(), rect.center().y() + 2, rect.width(), 34)
         painter.drawText(sub_rect, Qt.AlignHCenter | Qt.AlignTop, f"/ {self._format_size(self._total_bytes)}")
 
     def _format_size(self, size: int) -> str:

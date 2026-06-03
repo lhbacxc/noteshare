@@ -7,6 +7,7 @@ from PySide6.QtCore import QSignalBlocker, QTimer, Qt
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -50,7 +51,7 @@ from worker_client import WorkerClient, WorkerClientError
 class NoteShareMainWindow(QMainWindow):
     def __init__(self, icon_path: Path | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("NoteShare R2 管理工具 - PySide6 预览")
+        self.setWindowTitle("NoteShare R2 管理工具")
         self.resize(WINDOW_DEFAULT_WIDTH, WINDOW_DEFAULT_HEIGHT)
         self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
         self.setStyleSheet(APP_STYLESHEET)
@@ -78,19 +79,21 @@ class NoteShareMainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         scroll_area = QScrollArea()
+        scroll_area.setObjectName("AppScrollArea")
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QFrame.NoFrame)
 
         central = QWidget()
+        central.setObjectName("AppCanvas")
         root_layout = QVBoxLayout(central)
-        root_layout.setContentsMargins(16, 16, 16, 16)
-        root_layout.setSpacing(14)
+        root_layout.setContentsMargins(24, 24, 24, 24)
+        root_layout.setSpacing(18)
 
         self.config_section = CollapsibleSection("连接配置")
         config_layout = QGridLayout()
         config_layout.setContentsMargins(0, 0, 0, 0)
-        config_layout.setHorizontalSpacing(12)
-        config_layout.setVerticalSpacing(10)
+        config_layout.setHorizontalSpacing(14)
+        config_layout.setVerticalSpacing(12)
 
         self.account_id_edit = self._make_line_edit()
         self.access_key_edit = self._make_line_edit()
@@ -102,6 +105,7 @@ class NoteShareMainWindow(QMainWindow):
         self.bucket_combo = QComboBox()
         self.bucket_combo.setEditable(True)
         self.bucket_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.bucket_combo.setInsertPolicy(QComboBox.NoInsert)
 
         self.config_field_wrappers = [
             self._make_labeled_wrapper("Account ID", self.account_id_edit),
@@ -115,8 +119,8 @@ class NoteShareMainWindow(QMainWindow):
         ]
         self.config_fields_layout = QGridLayout()
         self.config_fields_layout.setContentsMargins(0, 0, 0, 0)
-        self.config_fields_layout.setHorizontalSpacing(12)
-        self.config_fields_layout.setVerticalSpacing(10)
+        self.config_fields_layout.setHorizontalSpacing(14)
+        self.config_fields_layout.setVerticalSpacing(12)
 
         self.save_button = self._make_button("保存配置")
         self.test_button = self._make_button("测试连接", primary=True)
@@ -124,8 +128,8 @@ class NoteShareMainWindow(QMainWindow):
         self.config_action_buttons = [self.save_button, self.test_button, self.load_buckets_button]
         self.config_actions_layout = QGridLayout()
         self.config_actions_layout.setContentsMargins(0, 0, 0, 0)
-        self.config_actions_layout.setHorizontalSpacing(10)
-        self.config_actions_layout.setVerticalSpacing(10)
+        self.config_actions_layout.setHorizontalSpacing(12)
+        self.config_actions_layout.setVerticalSpacing(12)
 
         config_layout.addLayout(self.config_fields_layout, 0, 0)
         config_layout.addLayout(self.config_actions_layout, 1, 0)
@@ -134,19 +138,22 @@ class NoteShareMainWindow(QMainWindow):
         filter_card = QGroupBox("筛选与浏览")
         filter_card.setObjectName("SurfaceCard")
         self.filter_layout = QGridLayout(filter_card)
-        self.filter_layout.setContentsMargins(16, 18, 16, 16)
-        self.filter_layout.setHorizontalSpacing(12)
-        self.filter_layout.setVerticalSpacing(10)
+        self.filter_layout.setContentsMargins(18, 20, 18, 18)
+        self.filter_layout.setHorizontalSpacing(14)
+        self.filter_layout.setVerticalSpacing(12)
         self.prefix_edit = self._make_line_edit()
+        self.prefix_edit.setPlaceholderText("输入前缀，例如 notes/ 或 images/")
         self.search_edit = self._make_line_edit()
+        self.search_edit.setPlaceholderText("搜索对象 key")
         self.refresh_button = self._make_button("刷新列表", primary=True)
         self.prefix_wrapper = self._make_labeled_wrapper("前缀", self.prefix_edit)
         self.search_wrapper = self._make_labeled_wrapper("搜索", self.search_edit)
 
-        action_card = QGroupBox("对象操作")
-        action_card.setObjectName("SurfaceCard")
-        self.action_layout = QGridLayout(action_card)
-        self.action_layout.setContentsMargins(16, 18, 16, 16)
+        self.action_card = QGroupBox("对象操作")
+        self.action_card.setObjectName("SurfaceCard")
+        self.action_card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.action_layout = QGridLayout(self.action_card)
+        self.action_layout.setContentsMargins(18, 14, 18, 14)
         self.action_layout.setHorizontalSpacing(10)
         self.action_layout.setVerticalSpacing(10)
         self.upload_button = self._make_button("上传文件", primary=True)
@@ -172,30 +179,45 @@ class NoteShareMainWindow(QMainWindow):
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(10)
+        left_layout.setSpacing(12)
 
+        self.table_title_label = QLabel("对象列表")
+        self.table_title_label.setObjectName("PaneTitle")
         self.table = ObjectTableWidget()
-        left_layout.addWidget(self.table)
+        left_layout.addWidget(self.table_title_label)
+        left_layout.addWidget(self.table, 1)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        self.detail_title_spacer = QWidget()
+        self.detail_title_spacer.setObjectName("PaneTitleSpacer")
+        self.detail_title_spacer.setFixedHeight(9)
 
         self.detail_panel = DetailPanel()
         self.action_buttons.extend(
             [self.detail_panel.copy_url_button, self.detail_panel.copy_share_button]
         )
         self.detail_scroll = QScrollArea()
+        self.detail_scroll.setObjectName("DetailScrollArea")
         self.detail_scroll.setWidgetResizable(True)
         self.detail_scroll.setFrameShape(QFrame.NoFrame)
         self.detail_scroll.setWidget(self.detail_panel)
-        self.detail_scroll.setMinimumWidth(250)
+        self.detail_scroll.setMinimumWidth(280)
+        self.detail_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_layout.addWidget(self.detail_title_spacer)
+        right_layout.addWidget(self.detail_scroll, 1)
         self.main_splitter.addWidget(left_panel)
-        self.main_splitter.addWidget(self.detail_scroll)
+        self.main_splitter.addWidget(right_panel)
         self.main_splitter.setStretchFactor(0, 4)
         self.main_splitter.setStretchFactor(1, 2)
-        self.main_splitter.setSizes([820, 320])
+        self.main_splitter.setSizes([860, 340])
 
         root_layout.addWidget(self.config_section)
         root_layout.addWidget(filter_card)
-        root_layout.addWidget(action_card)
         root_layout.addWidget(self.main_splitter, 1)
+        root_layout.addWidget(self.action_card)
 
         scroll_area.setWidget(central)
         self.setCentralWidget(scroll_area)
@@ -204,6 +226,7 @@ class NoteShareMainWindow(QMainWindow):
         self._set_status("就绪")
         self._rebuild_responsive_layouts()
         self.config_section.set_collapsed(self._should_collapse_config_by_default())
+        self._sync_config_section_summary()
 
     def _wire_events(self) -> None:
         self.save_button.clicked.connect(self.save_current_config)
@@ -225,6 +248,7 @@ class NoteShareMainWindow(QMainWindow):
 
     def _make_line_edit(self, password: bool = False) -> QLineEdit:
         line_edit = QLineEdit()
+        line_edit.setClearButtonEnabled(not password)
         if password:
             line_edit.setEchoMode(QLineEdit.Password)
         return line_edit
@@ -248,9 +272,32 @@ class NoteShareMainWindow(QMainWindow):
         wrapper_layout = QVBoxLayout(wrapper)
         wrapper_layout.setContentsMargins(0, 0, 0, 0)
         wrapper_layout.setSpacing(6)
-        wrapper_layout.addWidget(QLabel(label))
+        title_label = QLabel(label)
+        title_label.setObjectName("FieldLabel")
+        wrapper_layout.addWidget(title_label)
         wrapper_layout.addWidget(widget)
         return wrapper
+
+    def _make_section_label(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("SectionLabel")
+        return label
+
+    def _prompt_object_key(self, default_key: str) -> str | None:
+        dialog = QInputDialog(self)
+        dialog.setInputMode(QInputDialog.TextInput)
+        dialog.setWindowTitle("?? Key")
+        dialog.setLabelText("????????? Key?")
+        dialog.setTextValue(default_key)
+        dialog.setOkButtonText("??")
+        dialog.setCancelButtonText("??")
+        dialog.setStyleSheet(APP_STYLESHEET)
+        dialog.resize(460, 180)
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        value = dialog.textValue().strip()
+        return value or None
 
     def _load_config_to_form(self) -> None:
         config = self.state.config_data
@@ -262,6 +309,7 @@ class NoteShareMainWindow(QMainWindow):
         self.worker_admin_token_edit.setText(str(config.get("worker_admin_token", "")))
         self.expire_edit.setText(str(config.get("url_expire_seconds", 3600)))
         self.bucket_combo.setCurrentText(str(config.get("default_bucket", "")))
+        self._sync_config_section_summary()
 
     def _load_bucket_options_from_config(self) -> None:
         buckets = self.state.config_data.get("recent_buckets", [])
@@ -274,6 +322,7 @@ class NoteShareMainWindow(QMainWindow):
                 self.bucket_combo.addItem(current_bucket)
             if current_bucket:
                 self.bucket_combo.setCurrentText(current_bucket)
+        self._sync_config_section_summary()
 
     def _collect_form_config(self) -> dict[str, object]:
         return {
@@ -340,6 +389,7 @@ class NoteShareMainWindow(QMainWindow):
     def _set_status(self, message: str) -> None:
         self.state.status_message = message
         self.statusBar().showMessage(message, 5000)
+        self._sync_config_section_summary(status_override=message)
 
     def _set_buttons_state(self, disabled: bool) -> None:
         for button in self.action_buttons:
@@ -377,6 +427,7 @@ class NoteShareMainWindow(QMainWindow):
             save_config(self._collect_form_config())
             self.state.config_data = load_config()
             self._load_bucket_options_from_config()
+            self._sync_config_section_summary()
             self._set_status("配置已保存")
         except OSError as exc:
             QMessageBox.critical(self, "保存失败", str(exc))
@@ -392,6 +443,7 @@ class NoteShareMainWindow(QMainWindow):
             if bucket_names and not self.bucket_combo.currentText().strip():
                 self.bucket_combo.setCurrentText(bucket_names[0])
             self._save_bucket_history(bucket_names)
+            self._sync_config_section_summary()
             self._set_status(f"连接成功，共检测到 {result.get('bucket_count', 0)} 个 bucket")
 
         self._run_task("正在测试连接...", manager.test_connection, on_result=on_success)
@@ -407,6 +459,7 @@ class NoteShareMainWindow(QMainWindow):
             if bucket_names and current_bucket not in bucket_names:
                 self.bucket_combo.setCurrentText(bucket_names[0])
             self._save_bucket_history(bucket_names)
+            self._sync_config_section_summary()
             self._set_status(f"已加载 {len(bucket_names)} 个 bucket")
 
         self._run_task("正在加载 bucket 列表...", manager.list_buckets, on_result=on_success)
@@ -738,6 +791,7 @@ class NoteShareMainWindow(QMainWindow):
     def _on_bucket_change(self, _value: str) -> None:
         self._refresh_storage_summary(reset_loaded_state=True)
         self._sync_detail_from_selection()
+        self._sync_config_section_summary()
 
     def _apply_search_filter(self) -> None:
         keyword = self.search_edit.text().strip().lower()
@@ -814,6 +868,17 @@ class NoteShareMainWindow(QMainWindow):
         current["recent_buckets"] = buckets
         save_config(current)
         self.state.config_data = load_config()
+        self._sync_config_section_summary()
+
+    def _sync_config_section_summary(self, status_override: str | None = None) -> None:
+        bucket = self.bucket_combo.currentText().strip() or "未选择 bucket"
+        has_required_values = self._can_auto_refresh_on_startup()
+        status_text = status_override or ("连接信息已就绪" if has_required_values else "待补全连接信息")
+        self.config_section.set_meta_texts(
+            f"当前 bucket：{bucket}",
+            status_text,
+            status_accent=has_required_values,
+        )
 
     def _get_file_expire_seconds(self, bucket: str, object_key: str) -> int:
         record = self._get_object_record(bucket, object_key)
@@ -1091,7 +1156,7 @@ class NoteShareMainWindow(QMainWindow):
 
     def _rebuild_action_layout(self, width: int) -> None:
         self._clear_layout(self.action_layout)
-        columns = 4 if width >= 1380 else 3 if width >= 1120 else 2 if width >= 860 else 1
+        columns = 5 if width >= 1460 else 4 if width >= 1240 else 3 if width >= 980 else 2 if width >= 760 else 1
         for index, button in enumerate(self.object_action_buttons):
             row = index // columns
             column = index % columns
