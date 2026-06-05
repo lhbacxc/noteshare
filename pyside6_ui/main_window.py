@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 
-from PySide6.QtCore import QSignalBlocker, QTimer, Qt
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, QTimer, Qt
 from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QComboBox,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QScrollArea,
@@ -61,12 +64,14 @@ class NoteShareMainWindow(QMainWindow):
         self.state = UiState(config_data=load_config())
         self.task_runner = TaskRunner()
         self.action_buttons: list[QPushButton] = []
+        self.drop_upload_targets: list[QWidget] = []
 
         self._build_ui()
         self._load_config_to_form()
         self._load_bucket_options_from_config()
         self._refresh_storage_summary(reset_loaded_state=True)
         self._wire_events()
+        self._enable_drag_upload()
 
         self.startup_timer = QTimer(self)
         self.startup_timer.setSingleShot(True)
@@ -78,14 +83,14 @@ class NoteShareMainWindow(QMainWindow):
         self.countdown_timer.start(COUNTDOWN_REFRESH_MS)
 
     def _build_ui(self) -> None:
-        scroll_area = QScrollArea()
-        scroll_area.setObjectName("AppScrollArea")
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
+        self.app_scroll_area = QScrollArea()
+        self.app_scroll_area.setObjectName("AppScrollArea")
+        self.app_scroll_area.setWidgetResizable(True)
+        self.app_scroll_area.setFrameShape(QFrame.NoFrame)
 
-        central = QWidget()
-        central.setObjectName("AppCanvas")
-        root_layout = QVBoxLayout(central)
+        self.app_canvas = QWidget()
+        self.app_canvas.setObjectName("AppCanvas")
+        root_layout = QVBoxLayout(self.app_canvas)
         root_layout.setContentsMargins(24, 24, 24, 24)
         root_layout.setSpacing(18)
 
@@ -172,6 +177,24 @@ class NoteShareMainWindow(QMainWindow):
             self.create_share_button,
             self.revoke_share_button,
         ]
+        self.upload_progress_panel = QWidget()
+        self.upload_progress_panel.setObjectName("UploadProgressPanel")
+        self.upload_progress_layout = QVBoxLayout(self.upload_progress_panel)
+        self.upload_progress_layout.setContentsMargins(12, 10, 12, 10)
+        self.upload_progress_layout.setSpacing(6)
+        self.upload_progress_title = QLabel("上传状态")
+        self.upload_progress_title.setObjectName("UploadProgressTitle")
+        self.upload_progress_bar = QProgressBar()
+        self.upload_progress_bar.setObjectName("UploadProgressBar")
+        self.upload_progress_bar.setRange(0, 1000)
+        self.upload_progress_bar.setValue(0)
+        self.upload_progress_bar.setTextVisible(False)
+        self.upload_progress_detail = QLabel("待上传")
+        self.upload_progress_detail.setObjectName("UploadProgressDetail")
+        self.upload_progress_detail.setWordWrap(True)
+        self.upload_progress_layout.addWidget(self.upload_progress_title)
+        self.upload_progress_layout.addWidget(self.upload_progress_bar)
+        self.upload_progress_layout.addWidget(self.upload_progress_detail)
 
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setChildrenCollapsible(False)
@@ -219,8 +242,8 @@ class NoteShareMainWindow(QMainWindow):
         root_layout.addWidget(self.main_splitter, 1)
         root_layout.addWidget(self.action_card)
 
-        scroll_area.setWidget(central)
-        self.setCentralWidget(scroll_area)
+        self.app_scroll_area.setWidget(self.app_canvas)
+        self.setCentralWidget(self.app_scroll_area)
         status_bar = QStatusBar()
         self.setStatusBar(status_bar)
         self._set_status("就绪")
@@ -245,6 +268,30 @@ class NoteShareMainWindow(QMainWindow):
         self.search_edit.textChanged.connect(self._apply_search_filter)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
         self.bucket_combo.currentTextChanged.connect(self._on_bucket_change)
+
+    def _enable_drag_upload(self) -> None:
+        candidates = [
+            self,
+            self.centralWidget(),
+            self.app_scroll_area,
+            self.app_scroll_area.viewport(),
+            self.app_canvas,
+            self.main_splitter,
+            self.table,
+            self.table.viewport(),
+            self.action_card,
+        ]
+        seen_targets: set[int] = set()
+        for target in candidates:
+            if target is None:
+                continue
+            target_id = id(target)
+            if target_id in seen_targets:
+                continue
+            seen_targets.add(target_id)
+            target.setAcceptDrops(True)
+            target.installEventFilter(self)
+            self.drop_upload_targets.append(target)
 
     def _make_line_edit(self, password: bool = False) -> QLineEdit:
         line_edit = QLineEdit()
@@ -286,11 +333,11 @@ class NoteShareMainWindow(QMainWindow):
     def _prompt_object_key(self, default_key: str) -> str | None:
         dialog = QInputDialog(self)
         dialog.setInputMode(QInputDialog.TextInput)
-        dialog.setWindowTitle("?? Key")
-        dialog.setLabelText("????????? Key?")
+        dialog.setWindowTitle("对象 Key")
+        dialog.setLabelText("请输入上传后的对象 Key：")
         dialog.setTextValue(default_key)
-        dialog.setOkButtonText("??")
-        dialog.setCancelButtonText("??")
+        dialog.setOkButtonText("上传")
+        dialog.setCancelButtonText("取消")
         dialog.setStyleSheet(APP_STYLESHEET)
         dialog.resize(460, 180)
         if dialog.exec() != QDialog.Accepted:
@@ -399,7 +446,62 @@ class NoteShareMainWindow(QMainWindow):
         super().resizeEvent(event)
         self._rebuild_responsive_layouts()
 
-    def _run_task(self, status_text: str, task, on_result=None, on_error=None) -> None:
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        if watched in self.drop_upload_targets:
+            if event.type() in {QEvent.Type.DragEnter, QEvent.Type.DragMove}:
+                return self._handle_drag_upload_preview(event)
+            if event.type() == QEvent.Type.Drop:
+                return self._handle_drag_upload_drop(event)
+        return super().eventFilter(watched, event)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        self._handle_drag_upload_preview(event)
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        self._handle_drag_upload_preview(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        self._handle_drag_upload_drop(event)
+
+    def _handle_drag_upload_preview(self, event) -> bool:
+        if self._local_file_paths_from_event(event):
+            event.acceptProposedAction()
+            return True
+        event.ignore()
+        return False
+
+    def _handle_drag_upload_drop(self, event) -> bool:
+        local_paths = self._local_file_paths_from_event(event)
+        if not local_paths:
+            QMessageBox.warning(self, "无法拖拽上传", "拖拽上传目前只支持本地文件，暂不支持文件夹或远程链接。")
+            event.ignore()
+            return False
+        event.acceptProposedAction()
+        self._upload_local_paths(local_paths, status_text="正在拖拽上传文件...")
+        return True
+
+    def _local_file_paths_from_event(self, event) -> list[str]:
+        mime_data = event.mimeData()
+        if not mime_data.hasUrls():
+            return []
+        local_paths: list[str] = []
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            local_path = url.toLocalFile()
+            if Path(local_path).is_file():
+                local_paths.append(local_path)
+        return local_paths
+
+    def _run_task(
+        self,
+        status_text: str,
+        task,
+        on_result=None,
+        on_error=None,
+        on_progress=None,
+        task_accepts_progress: bool = False,
+    ) -> None:
         def handle_error(exc: Exception) -> None:
             self._set_buttons_state(False)
             self._set_status("操作失败")
@@ -420,6 +522,8 @@ class NoteShareMainWindow(QMainWindow):
             on_result=handle_result,
             on_error=handle_error,
             on_finished=None,
+            on_progress=on_progress,
+            task_accepts_progress=task_accepts_progress,
         )
 
     def save_current_config(self) -> None:
@@ -504,6 +608,12 @@ class NoteShareMainWindow(QMainWindow):
         self._run_task(status_text, task, on_result=on_success, on_error=on_error)
 
     def upload_file(self) -> None:
+        local_path, _filter = QFileDialog.getOpenFileName(self, "选择要上传的文件")
+        if not local_path:
+            return
+        self._upload_local_paths([local_path], status_text="正在上传文件...")
+
+    def _upload_local_paths(self, local_paths: list[str], status_text: str) -> None:
         manager = self._make_manager()
         if not manager:
             return
@@ -513,34 +623,179 @@ class NoteShareMainWindow(QMainWindow):
             QMessageBox.critical(self, "缺少 Bucket", "请先选择一个 bucket。")
             return
 
-        local_path, _filter = QFileDialog.getOpenFileName(self, "选择要上传的文件")
-        if not local_path:
+        upload_items: list[tuple[str, str, int]] = []
+        for local_path in local_paths:
+            path = Path(local_path)
+            if not path.is_file():
+                continue
+            object_key = self._prompt_object_key(self._default_upload_key(path))
+            if object_key is None:
+                return
+            try:
+                file_size = max(0, path.stat().st_size)
+            except OSError as exc:
+                QMessageBox.warning(self, "无法读取文件", f"{path.name}：{exc}")
+                continue
+            upload_items.append((str(path), object_key, file_size))
+
+        if not upload_items:
+            QMessageBox.warning(self, "没有可上传的文件", "请选择或拖入本地文件。")
             return
 
-        default_key = Path(local_path).name
+        self._start_upload_progress(upload_items)
+
+        def task(emit_progress) -> list[tuple[str, str, int]]:
+            lock = Lock()
+            total_bytes = sum(item_size for _item_path, _item_key, item_size in upload_items)
+            uploaded_bytes = 0
+            current_file_uploaded = 0
+            current_file_start = 0
+            speed_window_bytes = 0
+            speed_window_started_at = monotonic()
+            last_emit_at = 0.0
+
+            def emit_snapshot(
+                item_path: str,
+                item_key: str,
+                item_index: int,
+                item_size: int,
+                speed_bps: float = 0.0,
+            ) -> None:
+                emit_progress(
+                    {
+                        "file_name": Path(item_path).name,
+                        "object_key": item_key,
+                        "current_index": item_index,
+                        "total_files": len(upload_items),
+                        "current_file_uploaded": current_file_uploaded,
+                        "current_file_size": item_size,
+                        "uploaded_bytes": uploaded_bytes,
+                        "total_bytes": total_bytes,
+                        "speed_bps": speed_bps,
+                    }
+                )
+
+            for index, (item_path, item_key, item_size) in enumerate(upload_items, start=1):
+                with lock:
+                    current_file_start = uploaded_bytes
+                    current_file_uploaded = 0
+                    speed_window_bytes = 0
+                    speed_window_started_at = monotonic()
+                    last_emit_at = 0.0
+                    emit_snapshot(item_path, item_key, index, item_size)
+
+                def progress_callback(bytes_amount: int) -> None:
+                    nonlocal current_file_uploaded
+                    nonlocal last_emit_at
+                    nonlocal speed_window_bytes
+                    nonlocal speed_window_started_at
+                    nonlocal uploaded_bytes
+
+                    with lock:
+                        transferred = max(0, int(bytes_amount))
+                        current_file_uploaded = min(item_size, current_file_uploaded + transferred)
+                        uploaded_bytes = min(total_bytes, uploaded_bytes + transferred)
+                        speed_window_bytes += transferred
+                        now = monotonic()
+                        should_emit = now - last_emit_at >= 0.2 or uploaded_bytes >= total_bytes
+                        if not should_emit:
+                            return
+                        elapsed = max(0.001, now - speed_window_started_at)
+                        speed_bps = speed_window_bytes / elapsed
+                        speed_window_bytes = 0
+                        speed_window_started_at = now
+                        last_emit_at = now
+                        emit_snapshot(item_path, item_key, index, item_size, speed_bps)
+
+                manager.upload_file(bucket, item_path, item_key, progress_callback)
+
+                with lock:
+                    expected_uploaded = current_file_start + item_size
+                    if uploaded_bytes < expected_uploaded:
+                        uploaded_bytes = min(total_bytes, expected_uploaded)
+                    current_file_uploaded = item_size
+                    emit_snapshot(item_path, item_key, index, item_size)
+            return upload_items
+
+        def on_success(uploaded_items: list[tuple[str, str, int]]) -> None:
+            for item_path, item_key, _item_size in uploaded_items:
+                self._apply_storage_upload_update(bucket, item_key, item_path)
+            self._mark_upload_complete(uploaded_items)
+            if len(uploaded_items) == 1:
+                self._set_status(f"文件已上传到 {bucket}/{uploaded_items[0][1]}")
+            else:
+                self._set_status(f"已上传 {len(uploaded_items)} 个文件到 {bucket}")
+            self.refresh_objects()
+
+        def on_error(exc: Exception) -> None:
+            self._mark_upload_failed(exc)
+            QMessageBox.critical(self, "操作失败", str(exc))
+
+        self._run_task(
+            status_text,
+            task,
+            on_result=on_success,
+            on_error=on_error,
+            on_progress=self._update_upload_progress,
+            task_accepts_progress=True,
+        )
+
+    def _start_upload_progress(self, upload_items: list[tuple[str, str, int]]) -> None:
+        total_bytes = sum(item_size for _item_path, _item_key, item_size in upload_items)
+        self.upload_progress_bar.setValue(0 if total_bytes > 0 else 1000)
+        self.upload_progress_title.setText("准备上传")
+        self.upload_progress_detail.setText(
+            f"共 {len(upload_items)} 个文件 · 总大小 {self._format_size(total_bytes)}"
+        )
+
+    def _update_upload_progress(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        uploaded_bytes = self._coerce_object_size(payload.get("uploaded_bytes", 0))
+        total_bytes = self._coerce_object_size(payload.get("total_bytes", 0))
+        current_index = self._coerce_object_size(payload.get("current_index", 0))
+        total_files = self._coerce_object_size(payload.get("total_files", 0))
+        file_name = str(payload.get("file_name", "")).strip() or "当前文件"
+        object_key = str(payload.get("object_key", "")).strip()
+        speed_bps = self._coerce_float(payload.get("speed_bps", 0.0))
+
+        progress = 1.0 if total_bytes <= 0 else min(1.0, uploaded_bytes / total_bytes)
+        self.upload_progress_bar.setValue(int(progress * 1000))
+        title_parts = [f"正在上传：{file_name}"]
+        if total_files > 1 and current_index > 0:
+            title_parts.append(f"第 {current_index}/{total_files} 个文件")
+        self.upload_progress_title.setText(" · ".join(title_parts))
+
+        percent_text = f"{progress * 100:.1f}%"
+        detail_parts = [
+            percent_text,
+            f"{self._format_size(uploaded_bytes)} / {self._format_size(total_bytes)}",
+            self._format_speed(speed_bps),
+        ]
+        if object_key:
+            detail_parts.append(object_key)
+        self.upload_progress_detail.setText(" · ".join(detail_parts))
+        self._set_status(f"正在上传 {percent_text} · {self._format_speed(speed_bps)}")
+
+    def _mark_upload_complete(self, uploaded_items: list[tuple[str, str, int]]) -> None:
+        total_bytes = sum(item_size for _item_path, _item_key, item_size in uploaded_items)
+        self.upload_progress_bar.setValue(1000)
+        self.upload_progress_title.setText("上传完成")
+        self.upload_progress_detail.setText(
+            f"已上传 {len(uploaded_items)} 个文件 · {self._format_size(total_bytes)}"
+        )
+
+    def _mark_upload_failed(self, exc: Exception) -> None:
+        self.upload_progress_title.setText("上传失败")
+        self.upload_progress_detail.setText(str(exc))
+
+    def _default_upload_key(self, local_path: Path) -> str:
+        default_key = local_path.name
         prefix = self.prefix_edit.text().strip().strip("/")
         if prefix:
             default_key = f"{prefix}/{default_key}"
-
-        object_key, ok = QInputDialog.getText(
-            self,
-            "对象 Key",
-            "请输入上传后的对象 Key：",
-            text=default_key,
-        )
-        if not ok or not object_key.strip():
-            return
-        object_key = object_key.strip()
-
-        def task() -> None:
-            manager.upload_file(bucket, local_path, object_key)
-
-        def on_success(_result: object) -> None:
-            self._apply_storage_upload_update(bucket, object_key, local_path)
-            self._set_status(f"文件已上传到 {bucket}/{object_key}")
-            self.refresh_objects()
-
-        self._run_task("正在上传文件...", task, on_result=on_success)
+        return default_key
 
     def download_selected(self) -> None:
         manager = self._make_manager()
@@ -970,6 +1225,12 @@ class NoteShareMainWindow(QMainWindow):
         except (TypeError, ValueError):
             return 0
 
+    def _coerce_float(self, value: object) -> float:
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 0.0
+
     def _format_storage_percent(self, percent: float, used_bytes: int) -> str:
         if used_bytes <= 0:
             return "0.0%"
@@ -1083,6 +1344,9 @@ class NoteShareMainWindow(QMainWindow):
             value /= 1024
         return f"{size} B"
 
+    def _format_speed(self, bytes_per_second: float) -> str:
+        return f"{self._format_size(max(0, int(bytes_per_second)))}/s"
+
     def _auto_refresh_on_startup(self) -> None:
         if self._can_auto_refresh_on_startup():
             self._refresh_objects(show_error=False, status_text="正在自动加载当前 bucket 的文件列表...")
@@ -1161,6 +1425,8 @@ class NoteShareMainWindow(QMainWindow):
             row = index // columns
             column = index % columns
             self.action_layout.addWidget(button, row, column)
+        progress_row = (len(self.object_action_buttons) + columns - 1) // columns
+        self.action_layout.addWidget(self.upload_progress_panel, progress_row, 0, 1, columns)
         for column in range(columns):
             self.action_layout.setColumnStretch(column, 1)
 

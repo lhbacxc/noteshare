@@ -270,6 +270,31 @@ QTableWidget#ObjectTable::item {{
 QTableWidget#ObjectTable::item:selected {{
     background-color: {COLOR_PRIMARY_SOFT};
 }}
+QWidget#UploadProgressPanel {{
+    background-color: {COLOR_SURFACE_SUBTLE};
+    border: 1px solid {COLOR_BORDER_SOFT};
+    border-radius: 16px;
+}}
+QLabel#UploadProgressTitle {{
+    color: {COLOR_TEXT};
+    font-size: 13px;
+    font-weight: 600;
+}}
+QLabel#UploadProgressDetail {{
+    color: {COLOR_TEXT_MUTED};
+    font-size: 12px;
+}}
+QProgressBar#UploadProgressBar {{
+    background-color: #eceef3;
+    border: none;
+    border-radius: 5px;
+    min-height: 10px;
+    max-height: 10px;
+}}
+QProgressBar#UploadProgressBar::chunk {{
+    background-color: {COLOR_PRIMARY};
+    border-radius: 5px;
+}}
 QStatusBar {{
     background-color: {COLOR_SURFACE_ALT};
     border-top: 1px solid {COLOR_BORDER};

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import mimetypes
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import boto3
 from botocore.config import Config
@@ -75,7 +75,13 @@ class R2Manager:
         except (ClientError, BotoCoreError) as exc:
             raise R2Error(_format_boto_error(exc)) from exc
 
-    def upload_file(self, bucket: str, local_path: str, object_key: str) -> None:
+    def upload_file(
+        self,
+        bucket: str,
+        local_path: str,
+        object_key: str,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> None:
         try:
             extra_args = _build_upload_extra_args(local_path)
             if extra_args:
@@ -84,9 +90,15 @@ class R2Manager:
                     bucket,
                     object_key,
                     ExtraArgs=extra_args,
+                    Callback=progress_callback,
                 )
             else:
-                self.client.upload_file(local_path, bucket, object_key)
+                self.client.upload_file(
+                    local_path,
+                    bucket,
+                    object_key,
+                    Callback=progress_callback,
+                )
         except (ClientError, BotoCoreError, OSError) as exc:
             raise R2Error(_format_boto_error(exc)) from exc
 
