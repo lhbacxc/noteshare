@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from time import monotonic
 
 from PySide6.QtCore import QEvent, QObject, QSignalBlocker, QTimer, Qt
@@ -51,6 +51,11 @@ from r2_client import R2Credentials, R2Manager
 from worker_client import WorkerClient, WorkerClientError
 
 
+class UploadCancelled(Exception):
+    def __init__(self) -> None:
+        super().__init__("上传已取消")
+
+
 class NoteShareMainWindow(QMainWindow):
     def __init__(self, icon_path: Path | None = None) -> None:
         super().__init__()
@@ -65,6 +70,9 @@ class NoteShareMainWindow(QMainWindow):
         self.task_runner = TaskRunner()
         self.action_buttons: list[QPushButton] = []
         self.drop_upload_targets: list[QWidget] = []
+        self._upload_in_progress = False
+        self._upload_cancel_event: Event | None = None
+        self._pending_close_after_upload_cancel = False
 
         self._build_ui()
         self._load_config_to_form()
@@ -184,6 +192,9 @@ class NoteShareMainWindow(QMainWindow):
         self.upload_progress_layout.setSpacing(6)
         self.upload_progress_title = QLabel("上传状态")
         self.upload_progress_title.setObjectName("UploadProgressTitle")
+        self.cancel_upload_button = QPushButton("取消上传")
+        self.cancel_upload_button.setObjectName("DangerButton")
+        self.cancel_upload_button.setEnabled(False)
         self.upload_progress_bar = QProgressBar()
         self.upload_progress_bar.setObjectName("UploadProgressBar")
         self.upload_progress_bar.setRange(0, 1000)
@@ -192,7 +203,14 @@ class NoteShareMainWindow(QMainWindow):
         self.upload_progress_detail = QLabel("待上传")
         self.upload_progress_detail.setObjectName("UploadProgressDetail")
         self.upload_progress_detail.setWordWrap(True)
-        self.upload_progress_layout.addWidget(self.upload_progress_title)
+        upload_progress_header = QWidget()
+        upload_progress_header.setObjectName("UploadProgressHeader")
+        upload_progress_header_layout = QHBoxLayout(upload_progress_header)
+        upload_progress_header_layout.setContentsMargins(0, 0, 0, 0)
+        upload_progress_header_layout.setSpacing(8)
+        upload_progress_header_layout.addWidget(self.upload_progress_title, 1)
+        upload_progress_header_layout.addWidget(self.cancel_upload_button)
+        self.upload_progress_layout.addWidget(upload_progress_header)
         self.upload_progress_layout.addWidget(self.upload_progress_bar)
         self.upload_progress_layout.addWidget(self.upload_progress_detail)
 
@@ -257,6 +275,7 @@ class NoteShareMainWindow(QMainWindow):
         self.load_buckets_button.clicked.connect(self.load_buckets)
         self.refresh_button.clicked.connect(self.refresh_objects)
         self.upload_button.clicked.connect(self.upload_file)
+        self.cancel_upload_button.clicked.connect(self._request_cancel_upload)
         self.download_button.clicked.connect(self.download_selected)
         self.delete_button.clicked.connect(self.delete_selected)
         self.set_expire_button.clicked.connect(self.set_selected_file_expire_seconds)
@@ -446,6 +465,27 @@ class NoteShareMainWindow(QMainWindow):
         super().resizeEvent(event)
         self._rebuild_responsive_layouts()
 
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if not self._upload_in_progress:
+            super().closeEvent(event)
+            return
+
+        choice = QMessageBox.question(
+            self,
+            "上传仍在进行",
+            "当前仍有文件上传中。是否取消上传并关闭窗口？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if choice == QMessageBox.Yes:
+            event.ignore()
+            self._pending_close_after_upload_cancel = True
+            self._request_cancel_upload()
+            return
+
+        event.ignore()
+        self._set_status("上传仍在继续")
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
         if watched in self.drop_upload_targets:
             if event.type() in {QEvent.Type.DragEnter, QEvent.Type.DragMove}:
@@ -464,6 +504,9 @@ class NoteShareMainWindow(QMainWindow):
         self._handle_drag_upload_drop(event)
 
     def _handle_drag_upload_preview(self, event) -> bool:
+        if self._upload_in_progress:
+            event.ignore()
+            return False
         if self._local_file_paths_from_event(event):
             event.acceptProposedAction()
             return True
@@ -471,6 +514,10 @@ class NoteShareMainWindow(QMainWindow):
         return False
 
     def _handle_drag_upload_drop(self, event) -> bool:
+        if self._upload_in_progress:
+            QMessageBox.information(self, "上传进行中", "请等待当前上传完成，或先取消当前上传。")
+            event.ignore()
+            return False
         local_paths = self._local_file_paths_from_event(event)
         if not local_paths:
             QMessageBox.warning(self, "无法拖拽上传", "拖拽上传目前只支持本地文件，暂不支持文件夹或远程链接。")
@@ -479,6 +526,15 @@ class NoteShareMainWindow(QMainWindow):
         event.acceptProposedAction()
         self._upload_local_paths(local_paths, status_text="正在拖拽上传文件...")
         return True
+
+    def _request_cancel_upload(self) -> None:
+        if not self._upload_in_progress or self._upload_cancel_event is None:
+            self.cancel_upload_button.setEnabled(False)
+            return
+        self._upload_cancel_event.set()
+        self.cancel_upload_button.setEnabled(False)
+        self.upload_progress_title.setText("正在取消上传")
+        self._set_status("正在取消上传...")
 
     def _local_file_paths_from_event(self, event) -> list[str]:
         mime_data = event.mimeData()
@@ -499,6 +555,7 @@ class NoteShareMainWindow(QMainWindow):
         task,
         on_result=None,
         on_error=None,
+        on_finished=None,
         on_progress=None,
         task_accepts_progress: bool = False,
     ) -> None:
@@ -521,7 +578,7 @@ class NoteShareMainWindow(QMainWindow):
             on_started=lambda: (self._set_buttons_state(True), self._set_status(status_text)),
             on_result=handle_result,
             on_error=handle_error,
-            on_finished=None,
+            on_finished=on_finished,
             on_progress=on_progress,
             task_accepts_progress=task_accepts_progress,
         )
@@ -608,12 +665,18 @@ class NoteShareMainWindow(QMainWindow):
         self._run_task(status_text, task, on_result=on_success, on_error=on_error)
 
     def upload_file(self) -> None:
+        if self._upload_in_progress:
+            QMessageBox.information(self, "上传进行中", "请等待当前上传完成，或先取消当前上传。")
+            return
         local_path, _filter = QFileDialog.getOpenFileName(self, "选择要上传的文件")
         if not local_path:
             return
         self._upload_local_paths([local_path], status_text="正在上传文件...")
 
     def _upload_local_paths(self, local_paths: list[str], status_text: str) -> None:
+        if self._upload_in_progress:
+            QMessageBox.information(self, "上传进行中", "请等待当前上传完成，或先取消当前上传。")
+            return
         manager = self._make_manager()
         if not manager:
             return
@@ -643,6 +706,11 @@ class NoteShareMainWindow(QMainWindow):
             return
 
         self._start_upload_progress(upload_items)
+        cancel_event = Event()
+        self._upload_cancel_event = cancel_event
+        self._upload_in_progress = True
+        self._pending_close_after_upload_cancel = False
+        self.cancel_upload_button.setEnabled(True)
 
         def task(emit_progress) -> list[tuple[str, str, int]]:
             lock = Lock()
@@ -676,6 +744,8 @@ class NoteShareMainWindow(QMainWindow):
                 )
 
             for index, (item_path, item_key, item_size) in enumerate(upload_items, start=1):
+                if cancel_event.is_set():
+                    raise UploadCancelled()
                 with lock:
                     current_file_start = uploaded_bytes
                     current_file_uploaded = 0
@@ -691,7 +761,12 @@ class NoteShareMainWindow(QMainWindow):
                     nonlocal speed_window_started_at
                     nonlocal uploaded_bytes
 
+                    if cancel_event.is_set():
+                        raise UploadCancelled()
+
                     with lock:
+                        if cancel_event.is_set():
+                            raise UploadCancelled()
                         transferred = max(0, int(bytes_amount))
                         current_file_uploaded = min(item_size, current_file_uploaded + transferred)
                         uploaded_bytes = min(total_bytes, uploaded_bytes + transferred)
@@ -708,6 +783,8 @@ class NoteShareMainWindow(QMainWindow):
                         emit_snapshot(item_path, item_key, index, item_size, speed_bps)
 
                 manager.upload_file(bucket, item_path, item_key, progress_callback)
+                if cancel_event.is_set():
+                    raise UploadCancelled()
 
                 with lock:
                     expected_uploaded = current_file_start + item_size
@@ -728,14 +805,27 @@ class NoteShareMainWindow(QMainWindow):
             self.refresh_objects()
 
         def on_error(exc: Exception) -> None:
+            if isinstance(exc, UploadCancelled):
+                self._mark_upload_cancelled()
+                self._set_status("上传已取消")
+                return
             self._mark_upload_failed(exc)
             QMessageBox.critical(self, "操作失败", str(exc))
+
+        def on_finished() -> None:
+            self._upload_in_progress = False
+            self._upload_cancel_event = None
+            self.cancel_upload_button.setEnabled(False)
+            if self._pending_close_after_upload_cancel:
+                self._pending_close_after_upload_cancel = False
+                self.close()
 
         self._run_task(
             status_text,
             task,
             on_result=on_success,
             on_error=on_error,
+            on_finished=on_finished,
             on_progress=self._update_upload_progress,
             task_accepts_progress=True,
         )
@@ -789,6 +879,10 @@ class NoteShareMainWindow(QMainWindow):
     def _mark_upload_failed(self, exc: Exception) -> None:
         self.upload_progress_title.setText("上传失败")
         self.upload_progress_detail.setText(str(exc))
+
+    def _mark_upload_cancelled(self) -> None:
+        self.upload_progress_title.setText("上传已取消")
+        self.upload_progress_detail.setText("本次上传已停止，未完成的对象不会继续上传。")
 
     def _default_upload_key(self, local_path: Path) -> str:
         default_key = local_path.name

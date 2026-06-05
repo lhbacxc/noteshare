@@ -284,6 +284,13 @@ QLabel#UploadProgressDetail {{
     color: {COLOR_TEXT_MUTED};
     font-size: 12px;
 }}
+QWidget#UploadProgressHeader {{
+    background: transparent;
+}}
+QWidget#UploadProgressHeader QPushButton {{
+    padding: 5px 12px;
+    min-height: 18px;
+}}
 QProgressBar#UploadProgressBar {{
     background-color: #eceef3;
     border: none;
