@@ -48,12 +48,21 @@ from pyside6_ui.widgets.collapsible_section import CollapsibleSection
 from pyside6_ui.widgets.detail_panel import DetailPanel
 from pyside6_ui.widgets.object_table import ObjectTableWidget
 from r2_client import R2Credentials, R2Manager
+from upload_control import UploadInterrupted
+from upload_resume_store import (
+    calculate_file_md5,
+    delete_upload_sessions_for_file,
+    find_upload_session_by_content,
+    find_upload_sessions_for_file,
+    list_upload_sessions,
+    load_upload_session,
+    make_upload_session_key,
+    save_upload_session,
+)
 from worker_client import WorkerClient, WorkerClientError
 
 
-class UploadCancelled(Exception):
-    def __init__(self) -> None:
-        super().__init__("上传已取消")
+UploadCancelled = UploadInterrupted
 
 
 class NoteShareMainWindow(QMainWindow):
@@ -72,7 +81,12 @@ class NoteShareMainWindow(QMainWindow):
         self.drop_upload_targets: list[QWidget] = []
         self._upload_in_progress = False
         self._upload_cancel_event: Event | None = None
-        self._pending_close_after_upload_cancel = False
+        self._upload_stop_reason: str | None = None
+        self._resume_upload_bucket = ""
+        self._resume_upload_items: list[tuple[str, str, int]] = []
+        self._resume_upload_reason: str | None = None
+        self._pending_close_after_upload_stop = False
+        self._upload_progress_last_value = 0
 
         self._build_ui()
         self._load_config_to_form()
@@ -80,6 +94,7 @@ class NoteShareMainWindow(QMainWindow):
         self._refresh_storage_summary(reset_loaded_state=True)
         self._wire_events()
         self._enable_drag_upload()
+        self._load_resumable_upload_task_from_store()
 
         self.startup_timer = QTimer(self)
         self.startup_timer.setSingleShot(True)
@@ -192,6 +207,12 @@ class NoteShareMainWindow(QMainWindow):
         self.upload_progress_layout.setSpacing(6)
         self.upload_progress_title = QLabel("上传状态")
         self.upload_progress_title.setObjectName("UploadProgressTitle")
+        self.pause_upload_button = QPushButton("暂停上传")
+        self.pause_upload_button.setObjectName("SecondaryButton")
+        self.pause_upload_button.setEnabled(False)
+        self.resume_upload_button = QPushButton("继续上传")
+        self.resume_upload_button.setObjectName("PrimaryButton")
+        self.resume_upload_button.setEnabled(False)
         self.cancel_upload_button = QPushButton("取消上传")
         self.cancel_upload_button.setObjectName("DangerButton")
         self.cancel_upload_button.setEnabled(False)
@@ -209,6 +230,8 @@ class NoteShareMainWindow(QMainWindow):
         upload_progress_header_layout.setContentsMargins(0, 0, 0, 0)
         upload_progress_header_layout.setSpacing(8)
         upload_progress_header_layout.addWidget(self.upload_progress_title, 1)
+        upload_progress_header_layout.addWidget(self.resume_upload_button)
+        upload_progress_header_layout.addWidget(self.pause_upload_button)
         upload_progress_header_layout.addWidget(self.cancel_upload_button)
         self.upload_progress_layout.addWidget(upload_progress_header)
         self.upload_progress_layout.addWidget(self.upload_progress_bar)
@@ -275,6 +298,8 @@ class NoteShareMainWindow(QMainWindow):
         self.load_buckets_button.clicked.connect(self.load_buckets)
         self.refresh_button.clicked.connect(self.refresh_objects)
         self.upload_button.clicked.connect(self.upload_file)
+        self.pause_upload_button.clicked.connect(self._request_pause_upload)
+        self.resume_upload_button.clicked.connect(self._resume_paused_upload)
         self.cancel_upload_button.clicked.connect(self._request_cancel_upload)
         self.download_button.clicked.connect(self.download_selected)
         self.delete_button.clicked.connect(self.delete_selected)
@@ -390,6 +415,76 @@ class NoteShareMainWindow(QMainWindow):
                 self.bucket_combo.setCurrentText(current_bucket)
         self._sync_config_section_summary()
 
+    def _load_resumable_upload_task_from_store(self) -> None:
+        sessions = list_upload_sessions()
+        upload_items: list[tuple[str, str, int]] = []
+        latest_bucket = ""
+        latest_updated_at = ""
+
+        for session in sessions.values():
+            bucket = str(session.get("bucket", "")).strip()
+            object_key = str(session.get("object_key", "")).strip()
+            local_path = str(session.get("local_path", "")).strip()
+            updated_at = str(session.get("updated_at", "")).strip()
+            try:
+                expected_size = int(session.get("local_size", 0))
+            except (TypeError, ValueError):
+                expected_size = 0
+            if not bucket or not object_key or not local_path:
+                continue
+            path = Path(local_path)
+            try:
+                actual_size = path.stat().st_size
+            except OSError:
+                continue
+            if expected_size > 0 and actual_size != expected_size:
+                continue
+            if updated_at >= latest_updated_at:
+                latest_updated_at = updated_at
+                latest_bucket = bucket
+
+        if not latest_bucket:
+            return
+
+        for session in sessions.values():
+            if str(session.get("bucket", "")).strip() != latest_bucket:
+                continue
+            object_key = str(session.get("object_key", "")).strip()
+            local_path = str(session.get("local_path", "")).strip()
+            try:
+                expected_size = int(session.get("local_size", 0))
+            except (TypeError, ValueError):
+                expected_size = 0
+            path = Path(local_path)
+            try:
+                actual_size = path.stat().st_size
+            except OSError:
+                continue
+            if expected_size > 0 and actual_size != expected_size:
+                continue
+            upload_items.append((str(path), object_key, max(0, actual_size)))
+
+        if not upload_items:
+            return
+
+        if latest_bucket and self.bucket_combo.findText(latest_bucket) < 0:
+            self.bucket_combo.addItem(latest_bucket)
+        self.bucket_combo.setCurrentText(latest_bucket)
+        self._resume_upload_bucket = latest_bucket
+        self._resume_upload_items = upload_items
+        self._resume_upload_reason = "stored"
+        self.resume_upload_button.setEnabled(True)
+        self.cancel_upload_button.setEnabled(True)
+        total_bytes = sum(item_size for _item_path, _item_key, item_size in upload_items)
+        names = ", ".join(Path(item_path).name for item_path, _item_key, _item_size in upload_items[:3])
+        if len(upload_items) > 3:
+            names = f"{names} 等 {len(upload_items)} 个文件"
+        self._set_upload_progress_value(0)
+        self.upload_progress_title.setText("发现可继续上传")
+        self.upload_progress_detail.setText(
+            f"{names} · {self._format_size(total_bytes)} · 可点击继续上传"
+        )
+
     def _collect_form_config(self) -> dict[str, object]:
         return {
             "account_id": self.account_id_edit.text().strip(),
@@ -470,6 +565,12 @@ class NoteShareMainWindow(QMainWindow):
             super().closeEvent(event)
             return
 
+        if self._upload_stop_reason == "pause":
+            event.ignore()
+            self._pending_close_after_upload_stop = True
+            self._set_status("正在暂停上传，完成后将关闭窗口...")
+            return
+
         choice = QMessageBox.question(
             self,
             "上传仍在进行",
@@ -479,7 +580,7 @@ class NoteShareMainWindow(QMainWindow):
         )
         if choice == QMessageBox.Yes:
             event.ignore()
-            self._pending_close_after_upload_cancel = True
+            self._pending_close_after_upload_stop = True
             self._request_cancel_upload()
             return
 
@@ -528,13 +629,98 @@ class NoteShareMainWindow(QMainWindow):
         return True
 
     def _request_cancel_upload(self) -> None:
+        if self._upload_in_progress:
+            self._stop_upload("cancel")
+            return
+        if self._resume_upload_items and self._resume_upload_bucket:
+            self._cancel_stored_resumable_upload()
+            return
+        self.cancel_upload_button.setEnabled(False)
+
+    def _request_pause_upload(self) -> None:
+        self._stop_upload("pause")
+
+    def _stop_upload(self, reason: str) -> None:
         if not self._upload_in_progress or self._upload_cancel_event is None:
             self.cancel_upload_button.setEnabled(False)
+            self.pause_upload_button.setEnabled(False)
             return
+        self._upload_stop_reason = reason
         self._upload_cancel_event.set()
         self.cancel_upload_button.setEnabled(False)
+        self.pause_upload_button.setEnabled(False)
+        if reason == "pause":
+            self._set_upload_progress_busy()
+            self.upload_progress_title.setText("正在暂停上传")
+            self.upload_progress_detail.setText("正在等待当前分片响应并保存断点，完成后可继续上传。")
+            self._set_status("正在暂停上传...")
+        else:
+            self.resume_upload_button.setEnabled(False)
+            self._set_upload_progress_busy()
+            self.upload_progress_title.setText("正在取消上传")
+            self.upload_progress_detail.setText("正在停止上传并清理本次断点，完成后下次会重新上传。")
+            self._set_status("正在取消上传...")
+
+    def _resume_paused_upload(self) -> None:
+        if self._upload_in_progress:
+            QMessageBox.information(self, "上传进行中", "请等待当前上传完成。")
+            return
+        if not self._resume_upload_items or not self._resume_upload_bucket:
+            QMessageBox.information(self, "没有可继续的上传", "当前没有暂停中的上传任务。")
+            self.resume_upload_button.setEnabled(False)
+            return
+        self._start_confirmed_upload(
+            self._resume_upload_bucket,
+            list(self._resume_upload_items),
+            status_text="正在继续上传文件...",
+        )
+
+    def _cancel_stored_resumable_upload(self) -> None:
+        manager = self._make_manager()
+        if not manager:
+            return
+
+        bucket = self._resume_upload_bucket
+        upload_items = list(self._resume_upload_items)
+        if not bucket or not upload_items:
+            self.cancel_upload_button.setEnabled(False)
+            return
+
+        self.resume_upload_button.setEnabled(False)
+        self.cancel_upload_button.setEnabled(False)
+        self.pause_upload_button.setEnabled(False)
+        self._set_upload_progress_busy()
         self.upload_progress_title.setText("正在取消上传")
-        self._set_status("正在取消上传...")
+        self.upload_progress_detail.setText("正在清理已暂停任务的本地断点，并尝试停止远端未完成上传。")
+
+        def task() -> None:
+            self._cleanup_upload_sessions(manager, bucket, upload_items, ignore_abort_errors=False)
+
+        def on_success(_result: object) -> None:
+            self._resume_upload_bucket = ""
+            self._resume_upload_items = []
+            self._resume_upload_reason = None
+            self.resume_upload_button.setEnabled(False)
+            self.cancel_upload_button.setEnabled(False)
+            self.pause_upload_button.setEnabled(False)
+            self._mark_upload_cancelled()
+            self._set_status("已取消暂停中的上传任务")
+
+        def on_error(exc: Exception) -> None:
+            self.resume_upload_button.setEnabled(True)
+            self.cancel_upload_button.setEnabled(True)
+            self.pause_upload_button.setEnabled(False)
+            self._restore_upload_progress_range()
+            self.upload_progress_title.setText("取消上传失败")
+            self.upload_progress_detail.setText(f"{exc}。本地断点仍保留，可稍后重试取消或继续上传。")
+            QMessageBox.critical(self, "取消上传失败", str(exc))
+
+        self._run_task(
+            "正在取消暂停中的上传任务...",
+            task,
+            on_result=on_success,
+            on_error=on_error,
+        )
 
     def _local_file_paths_from_event(self, event) -> list[str]:
         mime_data = event.mimeData()
@@ -705,11 +891,33 @@ class NoteShareMainWindow(QMainWindow):
             QMessageBox.warning(self, "没有可上传的文件", "请选择或拖入本地文件。")
             return
 
+        self._resume_upload_bucket = bucket
+        self._resume_upload_items = list(upload_items)
+        self._start_confirmed_upload(bucket, upload_items, status_text)
+
+    def _start_confirmed_upload(
+        self,
+        bucket: str,
+        upload_items: list[tuple[str, str, int]],
+        status_text: str,
+    ) -> None:
+        if self._upload_in_progress:
+            QMessageBox.information(self, "上传进行中", "请等待当前上传完成。")
+            return
+        manager = self._make_manager()
+        if not manager:
+            return
+
+        upload_item_content_md5s: dict[tuple[str, str, int], str] = {}
         self._start_upload_progress(upload_items)
         cancel_event = Event()
         self._upload_cancel_event = cancel_event
         self._upload_in_progress = True
-        self._pending_close_after_upload_cancel = False
+        self._upload_stop_reason = None
+        self._resume_upload_reason = None
+        self._pending_close_after_upload_stop = False
+        self.resume_upload_button.setEnabled(False)
+        self.pause_upload_button.setEnabled(True)
         self.cancel_upload_button.setEnabled(True)
 
         def task(emit_progress) -> list[tuple[str, str, int]]:
@@ -718,6 +926,7 @@ class NoteShareMainWindow(QMainWindow):
             uploaded_bytes = 0
             current_file_uploaded = 0
             current_file_start = 0
+            current_file_is_resuming = False
             speed_window_bytes = 0
             speed_window_started_at = monotonic()
             last_emit_at = 0.0
@@ -728,6 +937,8 @@ class NoteShareMainWindow(QMainWindow):
                 item_index: int,
                 item_size: int,
                 speed_bps: float = 0.0,
+                is_resuming: bool = False,
+                is_hashing: bool = False,
             ) -> None:
                 emit_progress(
                     {
@@ -740,39 +951,132 @@ class NoteShareMainWindow(QMainWindow):
                         "uploaded_bytes": uploaded_bytes,
                         "total_bytes": total_bytes,
                         "speed_bps": speed_bps,
+                        "is_resuming": is_resuming,
+                        "is_hashing": is_hashing,
                     }
                 )
 
             for index, (item_path, item_key, item_size) in enumerate(upload_items, start=1):
                 if cancel_event.is_set():
-                    raise UploadCancelled()
+                    raise UploadCancelled(self._upload_stop_reason or "cancel")
                 with lock:
                     current_file_start = uploaded_bytes
                     current_file_uploaded = 0
+                    current_file_is_resuming = False
                     speed_window_bytes = 0
                     speed_window_started_at = monotonic()
                     last_emit_at = 0.0
-                    emit_snapshot(item_path, item_key, index, item_size)
+                    emit_snapshot(item_path, item_key, index, item_size, is_hashing=True)
+
+                def cancel_check() -> None:
+                    if cancel_event.is_set():
+                        raise UploadCancelled(self._upload_stop_reason or "cancel")
+
+                content_md5 = calculate_file_md5(item_path, cancel_check=cancel_check)
+                upload_item_content_md5s[(item_path, item_key, item_size)] = content_md5
+                session_key, resume_session = find_upload_session_by_content(
+                    manager.credentials.endpoint_url,
+                    bucket,
+                    item_key,
+                    item_path,
+                    item_size,
+                    content_md5,
+                )
+                if not session_key:
+                    session_key = make_upload_session_key(
+                        manager.credentials.endpoint_url,
+                        bucket,
+                        item_key,
+                        item_path,
+                        content_md5=content_md5,
+                        local_size=item_size,
+                    )
+                    legacy_session_key = make_upload_session_key(
+                        manager.credentials.endpoint_url,
+                        bucket,
+                        item_key,
+                        item_path,
+                    )
+                    resume_session = load_upload_session(legacy_session_key)
+
+                effective_item_key = item_key
+                if isinstance(resume_session, dict):
+                    stored_item_key = str(resume_session.get("object_key", "")).strip()
+                    if stored_item_key:
+                        effective_item_key = stored_item_key
+                if effective_item_key != item_key:
+                    upload_items[index - 1] = (item_path, effective_item_key, item_size)
+                    item_key = effective_item_key
+                    session_key = make_upload_session_key(
+                        manager.credentials.endpoint_url,
+                        bucket,
+                        item_key,
+                        item_path,
+                        content_md5=content_md5,
+                        local_size=item_size,
+                    )
+                    if not isinstance(resume_session, dict):
+                        resume_session = load_upload_session(session_key)
+                upload_item_content_md5s[(item_path, item_key, item_size)] = content_md5
+                with lock:
+                    emit_snapshot(
+                        item_path,
+                        item_key,
+                        index,
+                        item_size,
+                        is_resuming=isinstance(resume_session, dict),
+                    )
+
+                def session_callback(session: dict[str, object]) -> None:
+                    save_upload_session(session_key, session)
+
+                def resumed_callback(resumed_bytes: int) -> None:
+                    nonlocal current_file_uploaded
+                    nonlocal current_file_is_resuming
+                    nonlocal uploaded_bytes
+
+                    if resumed_bytes <= 0:
+                        return
+                    with lock:
+                        restored = min(item_size, max(0, int(resumed_bytes)))
+                        delta = max(0, restored - current_file_uploaded)
+                        current_file_uploaded = restored
+                        current_file_is_resuming = restored > 0
+                        uploaded_bytes = min(total_bytes, uploaded_bytes + delta)
+                        emit_snapshot(
+                            item_path,
+                            item_key,
+                            index,
+                            item_size,
+                            is_resuming=True,
+                        )
 
                 def progress_callback(bytes_amount: int) -> None:
                     nonlocal current_file_uploaded
+                    nonlocal current_file_is_resuming
                     nonlocal last_emit_at
                     nonlocal speed_window_bytes
                     nonlocal speed_window_started_at
                     nonlocal uploaded_bytes
 
                     if cancel_event.is_set():
-                        raise UploadCancelled()
+                        raise UploadCancelled(self._upload_stop_reason or "cancel")
 
                     with lock:
                         if cancel_event.is_set():
-                            raise UploadCancelled()
+                            raise UploadCancelled(self._upload_stop_reason or "cancel")
                         transferred = max(0, int(bytes_amount))
+                        was_resuming = current_file_is_resuming
+                        current_file_is_resuming = False
                         current_file_uploaded = min(item_size, current_file_uploaded + transferred)
                         uploaded_bytes = min(total_bytes, uploaded_bytes + transferred)
                         speed_window_bytes += transferred
                         now = monotonic()
-                        should_emit = now - last_emit_at >= 0.2 or uploaded_bytes >= total_bytes
+                        should_emit = (
+                            was_resuming
+                            or now - last_emit_at >= 0.2
+                            or uploaded_bytes >= total_bytes
+                        )
                         if not should_emit:
                             return
                         elapsed = max(0.001, now - speed_window_started_at)
@@ -780,23 +1084,58 @@ class NoteShareMainWindow(QMainWindow):
                         speed_window_bytes = 0
                         speed_window_started_at = now
                         last_emit_at = now
-                        emit_snapshot(item_path, item_key, index, item_size, speed_bps)
+                        emit_snapshot(
+                            item_path,
+                            item_key,
+                            index,
+                            item_size,
+                            speed_bps,
+                            is_resuming=current_file_is_resuming,
+                        )
 
-                manager.upload_file(bucket, item_path, item_key, progress_callback)
+                manager.upload_resumable_file(
+                    bucket,
+                    item_path,
+                    item_key,
+                    resume_session=resume_session,
+                    session_callback=session_callback,
+                    progress_callback=progress_callback,
+                    resumed_callback=resumed_callback,
+                    cancel_check=cancel_check,
+                    content_md5=content_md5,
+                )
                 if cancel_event.is_set():
-                    raise UploadCancelled()
+                    raise UploadCancelled(self._upload_stop_reason or "cancel")
+                delete_upload_sessions_for_file(
+                    manager.credentials.endpoint_url,
+                    bucket,
+                    item_key,
+                    item_path,
+                    content_md5=content_md5,
+                    local_size=item_size,
+                )
 
                 with lock:
                     expected_uploaded = current_file_start + item_size
                     if uploaded_bytes < expected_uploaded:
                         uploaded_bytes = min(total_bytes, expected_uploaded)
                     current_file_uploaded = item_size
-                    emit_snapshot(item_path, item_key, index, item_size)
+                    emit_snapshot(
+                        item_path,
+                        item_key,
+                        index,
+                        item_size,
+                        is_resuming=current_file_is_resuming,
+                    )
             return upload_items
 
         def on_success(uploaded_items: list[tuple[str, str, int]]) -> None:
             for item_path, item_key, _item_size in uploaded_items:
                 self._apply_storage_upload_update(bucket, item_key, item_path)
+            self._resume_upload_bucket = ""
+            self._resume_upload_items = []
+            self._resume_upload_reason = None
+            self.resume_upload_button.setEnabled(False)
             self._mark_upload_complete(uploaded_items)
             if len(uploaded_items) == 1:
                 self._set_status(f"文件已上传到 {bucket}/{uploaded_items[0][1]}")
@@ -806,18 +1145,45 @@ class NoteShareMainWindow(QMainWindow):
 
         def on_error(exc: Exception) -> None:
             if isinstance(exc, UploadCancelled):
-                self._mark_upload_cancelled()
-                self._set_status("上传已取消")
+                if exc.reason == "pause":
+                    self._resume_upload_bucket = bucket
+                    self._resume_upload_items = list(upload_items)
+                    self._resume_upload_reason = "pause"
+                    self._mark_upload_paused(upload_items)
+                    self._set_status("上传已暂停，可继续上传")
+                else:
+                    self._cleanup_upload_sessions(
+                        manager,
+                        bucket,
+                        upload_items,
+                        content_md5s=upload_item_content_md5s,
+                    )
+                    self._resume_upload_bucket = ""
+                    self._resume_upload_items = []
+                    self._resume_upload_reason = None
+                    self.resume_upload_button.setEnabled(False)
+                    self._mark_upload_cancelled()
+                    self._set_status("上传已取消，下次会重新上传")
                 return
             self._mark_upload_failed(exc)
+            self._resume_upload_bucket = bucket
+            self._resume_upload_items = list(upload_items)
+            self._resume_upload_reason = "failure"
+            self.resume_upload_button.setEnabled(True)
             QMessageBox.critical(self, "操作失败", str(exc))
 
         def on_finished() -> None:
             self._upload_in_progress = False
             self._upload_cancel_event = None
-            self.cancel_upload_button.setEnabled(False)
-            if self._pending_close_after_upload_cancel:
-                self._pending_close_after_upload_cancel = False
+            self._upload_stop_reason = None
+            self.pause_upload_button.setEnabled(False)
+            if self._resume_upload_items and self._resume_upload_bucket:
+                self.resume_upload_button.setEnabled(True)
+                self.cancel_upload_button.setEnabled(True)
+            else:
+                self.cancel_upload_button.setEnabled(False)
+            if self._pending_close_after_upload_stop:
+                self._pending_close_after_upload_stop = False
                 self.close()
 
         self._run_task(
@@ -832,7 +1198,7 @@ class NoteShareMainWindow(QMainWindow):
 
     def _start_upload_progress(self, upload_items: list[tuple[str, str, int]]) -> None:
         total_bytes = sum(item_size for _item_path, _item_key, item_size in upload_items)
-        self.upload_progress_bar.setValue(0 if total_bytes > 0 else 1000)
+        self._set_upload_progress_value(0 if total_bytes > 0 else 1000)
         self.upload_progress_title.setText("准备上传")
         self.upload_progress_detail.setText(
             f"共 {len(upload_items)} 个文件 · 总大小 {self._format_size(total_bytes)}"
@@ -840,6 +1206,8 @@ class NoteShareMainWindow(QMainWindow):
 
     def _update_upload_progress(self, payload: object) -> None:
         if not isinstance(payload, dict):
+            return
+        if self._upload_stop_reason in {"pause", "cancel"}:
             return
 
         uploaded_bytes = self._coerce_object_size(payload.get("uploaded_bytes", 0))
@@ -849,10 +1217,28 @@ class NoteShareMainWindow(QMainWindow):
         file_name = str(payload.get("file_name", "")).strip() or "当前文件"
         object_key = str(payload.get("object_key", "")).strip()
         speed_bps = self._coerce_float(payload.get("speed_bps", 0.0))
+        is_resuming = bool(payload.get("is_resuming", False))
+        is_hashing = bool(payload.get("is_hashing", False))
 
         progress = 1.0 if total_bytes <= 0 else min(1.0, uploaded_bytes / total_bytes)
-        self.upload_progress_bar.setValue(int(progress * 1000))
-        title_parts = [f"正在上传：{file_name}"]
+        self._set_upload_progress_value(int(progress * 1000))
+        if is_hashing:
+            title_parts = [f"正在校验文件：{file_name}"]
+            if total_files > 1 and current_index > 0:
+                title_parts.append(f"第 {current_index}/{total_files} 个文件")
+            self.upload_progress_title.setText(" · ".join(title_parts))
+            detail_parts = [
+                "正在计算 MD5",
+                f"{self._format_size(uploaded_bytes)} / {self._format_size(total_bytes)}",
+            ]
+            if object_key:
+                detail_parts.append(object_key)
+            self.upload_progress_detail.setText(" · ".join(detail_parts))
+            self._set_status("正在计算文件 MD5...")
+            return
+
+        title_prefix = "断点续传" if is_resuming else "正在上传"
+        title_parts = [f"{title_prefix}：{file_name}"]
         if total_files > 1 and current_index > 0:
             title_parts.append(f"第 {current_index}/{total_files} 个文件")
         self.upload_progress_title.setText(" · ".join(title_parts))
@@ -870,19 +1256,90 @@ class NoteShareMainWindow(QMainWindow):
 
     def _mark_upload_complete(self, uploaded_items: list[tuple[str, str, int]]) -> None:
         total_bytes = sum(item_size for _item_path, _item_key, item_size in uploaded_items)
-        self.upload_progress_bar.setValue(1000)
+        self._set_upload_progress_value(1000)
         self.upload_progress_title.setText("上传完成")
         self.upload_progress_detail.setText(
             f"已上传 {len(uploaded_items)} 个文件 · {self._format_size(total_bytes)}"
         )
 
     def _mark_upload_failed(self, exc: Exception) -> None:
+        self._restore_upload_progress_range()
         self.upload_progress_title.setText("上传失败")
-        self.upload_progress_detail.setText(str(exc))
+        self.upload_progress_detail.setText(f"{exc}。可点击继续上传从断点重试。")
+
+    def _mark_upload_paused(self, upload_items: list[tuple[str, str, int]]) -> None:
+        total_bytes = sum(item_size for _item_path, _item_key, item_size in upload_items)
+        self._restore_upload_progress_range()
+        self.upload_progress_title.setText("上传已暂停")
+        self.upload_progress_detail.setText(
+            f"已保留断点 · 共 {len(upload_items)} 个文件 · {self._format_size(total_bytes)}"
+        )
+        self.resume_upload_button.setEnabled(True)
+        self.cancel_upload_button.setEnabled(True)
 
     def _mark_upload_cancelled(self) -> None:
+        self._set_upload_progress_value(0)
         self.upload_progress_title.setText("上传已取消")
-        self.upload_progress_detail.setText("本次上传已停止，未完成的对象不会继续上传。")
+        self.upload_progress_detail.setText("本次上传断点已清理，下次上传会重新开始。")
+
+    def _set_upload_progress_busy(self) -> None:
+        self.upload_progress_bar.setRange(0, 0)
+
+    def _restore_upload_progress_range(self) -> None:
+        if self.upload_progress_bar.minimum() != 0 or self.upload_progress_bar.maximum() != 1000:
+            self.upload_progress_bar.setRange(0, 1000)
+            self.upload_progress_bar.setValue(self._upload_progress_last_value)
+
+    def _set_upload_progress_value(self, value: int) -> None:
+        self._restore_upload_progress_range()
+        self._upload_progress_last_value = max(0, min(1000, int(value)))
+        self.upload_progress_bar.setValue(self._upload_progress_last_value)
+
+    def _cleanup_upload_sessions(
+        self,
+        manager: R2Manager | None,
+        bucket: str,
+        upload_items: list[tuple[str, str, int]],
+        ignore_abort_errors: bool = True,
+        content_md5s: dict[tuple[str, str, int], str] | None = None,
+    ) -> None:
+        endpoint_url = manager.credentials.endpoint_url if manager else self.endpoint_edit.text().strip()
+        for item_path, item_key, item_size in upload_items:
+            content_md5 = (content_md5s or {}).get((item_path, item_key, item_size), "")
+            matching_sessions = find_upload_sessions_for_file(
+                endpoint_url,
+                bucket,
+                item_key,
+                item_path,
+                content_md5=content_md5,
+                local_size=item_size,
+            )
+            for session in matching_sessions.values():
+                upload_id = str(session.get("upload_id", "")).strip()
+                session_object_key = str(session.get("object_key", "")).strip() or item_key
+                if upload_id and manager is not None:
+                    try:
+                        manager.abort_multipart_upload(bucket, session_object_key, upload_id)
+                    except Exception:
+                        if not ignore_abort_errors:
+                            raise
+                delete_upload_sessions_for_file(
+                    endpoint_url,
+                    bucket,
+                    session_object_key,
+                    str(session.get("local_path", "")).strip() or item_path,
+                    content_md5=str(session.get("content_md5", "")).strip(),
+                    local_size=item_size,
+                )
+            if not matching_sessions:
+                delete_upload_sessions_for_file(
+                    endpoint_url,
+                    bucket,
+                    item_key,
+                    item_path,
+                    content_md5=content_md5,
+                    local_size=item_size,
+                )
 
     def _default_upload_key(self, local_path: Path) -> str:
         default_key = local_path.name
