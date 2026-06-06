@@ -91,6 +91,15 @@ QLabel#PaneTitle {{
     font-weight: 600;
     padding-left: 18px;
 }}
+QWidget#PaneHeader {{
+    background: transparent;
+}}
+QLabel#InlineStatusText {{
+    color: {COLOR_TEXT_SUBTLE};
+    font-size: 12px;
+    font-weight: 500;
+    padding-right: 4px;
+}}
 QLabel#SectionTitle {{
     color: {COLOR_TEXT};
     font-size: 16px;
@@ -262,13 +271,43 @@ QTableWidget#ObjectTable {{
     gridline-color: transparent;
     outline: none;
 }}
+QTableWidget#ObjectTable QWidget#ObjectTableViewport {{
+    background-color: {COLOR_SURFACE};
+    border-radius: 23px;
+}}
 QTableWidget#ObjectTable::item {{
     padding: 8px 10px;
     border-bottom: 1px solid #f2f2f5;
     background-color: {COLOR_SURFACE};
 }}
+QTableWidget#ObjectTable::item:alternate {{
+    background-color: {COLOR_SURFACE_ALT};
+}}
 QTableWidget#ObjectTable::item:selected {{
     background-color: {COLOR_PRIMARY_SOFT};
+}}
+QTableWidget#ObjectTable::corner {{
+    background-color: {COLOR_SURFACE};
+    border: none;
+}}
+QScrollBar#ObjectTableScrollBar:vertical {{
+    width: 10px;
+    background: transparent;
+    border: none;
+    margin: 8px 0;
+}}
+QScrollBar#ObjectTableScrollBar::handle:vertical {{
+    background-color: #d7d8de;
+    border-radius: 5px;
+    min-height: 30px;
+}}
+QScrollBar#ObjectTableScrollBar::add-line:vertical,
+QScrollBar#ObjectTableScrollBar::sub-line:vertical,
+QScrollBar#ObjectTableScrollBar::add-page:vertical,
+QScrollBar#ObjectTableScrollBar::sub-page:vertical {{
+    background: transparent;
+    border: none;
+    height: 0;
 }}
 QWidget#UploadProgressPanel {{
     background-color: {COLOR_SURFACE_SUBTLE};
@@ -301,14 +340,6 @@ QProgressBar#UploadProgressBar {{
 QProgressBar#UploadProgressBar::chunk {{
     background-color: {COLOR_PRIMARY};
     border-radius: 5px;
-}}
-QStatusBar {{
-    background-color: {COLOR_SURFACE_ALT};
-    border-top: 1px solid {COLOR_BORDER};
-    color: {COLOR_TEXT_MUTED};
-    border-top-left-radius: 18px;
-    border-top-right-radius: 18px;
-    padding-left: 10px;
 }}
 QSplitter::handle {{
     background: transparent;

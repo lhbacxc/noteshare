@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBitmap, QPainter, QRegion, QResizeEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -38,6 +39,8 @@ class ObjectTableWidget(QTableWidget):
         super().__init__(0, len(self.HEADERS), parent)
         self.setHorizontalHeaderLabels(self.HEADERS)
         self.setObjectName("ObjectTable")
+        self.viewport().setObjectName("ObjectTableViewport")
+        self.verticalScrollBar().setObjectName("ObjectTableScrollBar")
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setAlternatingRowColors(True)
@@ -60,6 +63,25 @@ class ObjectTableWidget(QTableWidget):
         self.setViewportMargins(0, 0, 0, 0)
         self.setFocusPolicy(Qt.StrongFocus)
         self.sortByColumn(0, Qt.AscendingOrder)
+        self._apply_rounded_mask()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._apply_rounded_mask()
+
+    def _apply_rounded_mask(self) -> None:
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        radius = 24
+        mask = QBitmap(self.size())
+        mask.fill(Qt.color0)
+        painter = QPainter(mask)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(Qt.color1)
+        painter.drawRoundedRect(self.rect(), radius, radius)
+        painter.end()
+        self.setMask(QRegion(mask))
 
     def populate(
         self,

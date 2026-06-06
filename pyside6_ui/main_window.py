@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QScrollArea,
     QSplitter,
-    QStatusBar,
     QVBoxLayout,
     QWidget,
 )
@@ -64,6 +63,9 @@ from worker_client import WorkerClient, WorkerClientError
 
 
 UploadCancelled = UploadInterrupted
+
+ACTION_BUTTON_MAX_COLUMNS = 5
+ACTION_BUTTON_TARGET_COLUMN_WIDTH = 240
 
 
 class NoteShareMainWindow(QMainWindow):
@@ -252,10 +254,21 @@ class NoteShareMainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(12)
 
+        self.table_header = QWidget()
+        self.table_header.setObjectName("PaneHeader")
+        table_header_layout = QHBoxLayout(self.table_header)
+        table_header_layout.setContentsMargins(0, 0, 0, 0)
+        table_header_layout.setSpacing(8)
         self.table_title_label = QLabel("对象列表")
         self.table_title_label.setObjectName("PaneTitle")
+        self.inline_status_label = QLabel("就绪")
+        self.inline_status_label.setObjectName("InlineStatusText")
+        self.inline_status_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.inline_status_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.table = ObjectTableWidget()
-        left_layout.addWidget(self.table_title_label)
+        table_header_layout.addWidget(self.table_title_label)
+        table_header_layout.addWidget(self.inline_status_label, 1)
+        left_layout.addWidget(self.table_header)
         left_layout.addWidget(self.table, 1)
 
         right_panel = QWidget()
@@ -292,8 +305,6 @@ class NoteShareMainWindow(QMainWindow):
 
         self.app_scroll_area.setWidget(self.app_canvas)
         self.setCentralWidget(self.app_scroll_area)
-        status_bar = QStatusBar()
-        self.setStatusBar(status_bar)
         self._set_status("就绪")
         self._rebuild_responsive_layouts()
         self.config_section.set_collapsed(self._should_collapse_config_by_default())
@@ -567,7 +578,9 @@ class NoteShareMainWindow(QMainWindow):
 
     def _set_status(self, message: str) -> None:
         self.state.status_message = message
-        self.statusBar().showMessage(message, 5000)
+        if hasattr(self, "inline_status_label"):
+            self.inline_status_label.setText(message)
+            self.inline_status_label.setToolTip(message)
         self._sync_config_section_summary(status_override=message)
 
     def _set_buttons_state(self, disabled: bool) -> None:
@@ -1991,8 +2004,16 @@ class NoteShareMainWindow(QMainWindow):
             self._sync_detail_from_selection()
 
     def _clear_layout(self, layout: QGridLayout) -> None:
+        row_count = layout.rowCount()
+        column_count = layout.columnCount()
         while layout.count():
             layout.takeAt(0)
+        for row in range(row_count):
+            layout.setRowStretch(row, 0)
+            layout.setRowMinimumHeight(row, 0)
+        for column in range(column_count):
+            layout.setColumnStretch(column, 0)
+            layout.setColumnMinimumWidth(column, 0)
 
     def _rebuild_responsive_layouts(self) -> None:
         width = self.width()
@@ -2044,7 +2065,12 @@ class NoteShareMainWindow(QMainWindow):
 
     def _rebuild_action_layout(self, width: int) -> None:
         self._clear_layout(self.action_layout)
-        columns = 5 if width >= 1460 else 4 if width >= 1240 else 3 if width >= 980 else 2 if width >= 760 else 1
+        margins = self.action_layout.contentsMargins()
+        spacing = max(0, self.action_layout.horizontalSpacing())
+        action_width = self.action_card.width() or width
+        content_width = max(0, action_width - margins.left() - margins.right())
+        column_unit = ACTION_BUTTON_TARGET_COLUMN_WIDTH + spacing
+        columns = max(1, min(ACTION_BUTTON_MAX_COLUMNS, (content_width + spacing) // column_unit))
         for index, button in enumerate(self.object_action_buttons):
             row = index // columns
             column = index % columns
