@@ -1,10 +1,11 @@
 __pycache__/
 *.py[cod]
+.superpowers/
 config.json
 upload_resume_state.json
 logs/
 build/
-dist/config.json
+dist/
 .wrangler/
 worker/node_modules/
 worker/.wrangler/

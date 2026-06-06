@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 from pathlib import Path
 from PyInstaller.building.datastruct import TOC
 
 
-CONDA_ENV = Path(r"D:\Software\Miniconda\envs\noteshare")
+CONDA_ENV = Path(
+    os.environ.get("NOTESHARE_CONDA_ENV")
+    or os.environ.get("CONDA_PREFIX")
+    or Path(sys.executable).resolve().parent
+).resolve()
 PINNED_DLL_NAMES = (
     "libssl-3-x64.dll",
     "libcrypto-3-x64.dll",
