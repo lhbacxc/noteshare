@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from app_logger import clean_log_level
+
 
 if getattr(sys, "frozen", False):
     BASE_DIR = Path(sys.executable).resolve().parent
@@ -23,6 +25,7 @@ def get_default_config() -> dict[str, Any]:
         "worker_admin_token": "",
         "default_bucket": "",
         "url_expire_seconds": 3600,
+        "log_level": "error",
         "recent_buckets": [],
         "object_url_settings": {},
     }
@@ -39,6 +42,7 @@ def _clean_config(raw: dict[str, Any]) -> dict[str, Any]:
     config["worker_base_url"] = str(config.get("worker_base_url", "")).strip()
     config["worker_admin_token"] = str(config.get("worker_admin_token", "")).strip()
     config["default_bucket"] = str(config.get("default_bucket", "")).strip()
+    config["log_level"] = clean_log_level(config.get("log_level", "error"))
 
     try:
         expire_seconds = int(config.get("url_expire_seconds", 3600))

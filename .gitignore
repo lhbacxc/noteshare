@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 config.json
 upload_resume_state.json
+logs/
 build/
 dist/config.json
 .wrangler/

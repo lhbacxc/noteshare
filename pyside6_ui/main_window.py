@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app_logger import LOG_LEVEL_LABELS, clean_log_level, configure_app_logger
 from config_manager import load_config, save_config
 from pyside6_ui.state import UiState
 from pyside6_ui.tasks import TaskRunner
@@ -76,6 +77,7 @@ class NoteShareMainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
 
         self.state = UiState(config_data=load_config())
+        self.logger = configure_app_logger(self.state.config_data.get("log_level", "error"))
         self.task_runner = TaskRunner()
         self.action_buttons: list[QPushButton] = []
         self.drop_upload_targets: list[QWidget] = []
@@ -134,6 +136,10 @@ class NoteShareMainWindow(QMainWindow):
         self.bucket_combo.setEditable(True)
         self.bucket_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.bucket_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.log_level_combo = QComboBox()
+        self.log_level_combo.setEditable(False)
+        for level_value, level_label in LOG_LEVEL_LABELS.items():
+            self.log_level_combo.addItem(level_label, level_value)
 
         self.config_field_wrappers = [
             self._make_labeled_wrapper("Account ID", self.account_id_edit),
@@ -144,6 +150,7 @@ class NoteShareMainWindow(QMainWindow):
             self._make_labeled_wrapper("Worker Base URL", self.worker_base_url_edit),
             self._make_labeled_wrapper("Worker Admin Token", self.worker_admin_token_edit),
             self._make_labeled_wrapper("Bucket", self.bucket_combo),
+            self._make_labeled_wrapper("日志等级", self.log_level_combo),
         ]
         self.config_fields_layout = QGridLayout()
         self.config_fields_layout.setContentsMargins(0, 0, 0, 0)
@@ -400,7 +407,17 @@ class NoteShareMainWindow(QMainWindow):
         self.worker_admin_token_edit.setText(str(config.get("worker_admin_token", "")))
         self.expire_edit.setText(str(config.get("url_expire_seconds", 3600)))
         self.bucket_combo.setCurrentText(str(config.get("default_bucket", "")))
+        self._set_log_level_combo(str(config.get("log_level", "error")))
         self._sync_config_section_summary()
+
+    def _set_log_level_combo(self, level: str) -> None:
+        cleaned_level = clean_log_level(level)
+        index = self.log_level_combo.findData(cleaned_level)
+        if index >= 0:
+            self.log_level_combo.setCurrentIndex(index)
+
+    def _current_log_level(self) -> str:
+        return clean_log_level(self.log_level_combo.currentData())
 
     def _load_bucket_options_from_config(self) -> None:
         buckets = self.state.config_data.get("recent_buckets", [])
@@ -495,6 +512,7 @@ class NoteShareMainWindow(QMainWindow):
             "worker_admin_token": self.worker_admin_token_edit.text().strip(),
             "default_bucket": self.bucket_combo.currentText().strip(),
             "url_expire_seconds": self.expire_edit.text().strip(),
+            "log_level": self._current_log_level(),
             "recent_buckets": [self.bucket_combo.itemText(index) for index in range(self.bucket_combo.count())],
             "object_url_settings": self.state.config_data.get("object_url_settings", {}),
         }
@@ -713,6 +731,12 @@ class NoteShareMainWindow(QMainWindow):
             self._restore_upload_progress_range()
             self.upload_progress_title.setText("取消上传失败")
             self.upload_progress_detail.setText(f"{exc}。本地断点仍保留，可稍后重试取消或继续上传。")
+            self.logger.error(
+                "取消已暂停上传失败：bucket=%s, 文件=%s",
+                bucket,
+                self._format_upload_items_for_log(upload_items),
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             QMessageBox.critical(self, "取消上传失败", str(exc))
 
         self._run_task(
@@ -751,6 +775,11 @@ class NoteShareMainWindow(QMainWindow):
             if on_error is not None:
                 on_error(exc)
                 return
+            self.logger.error(
+                "后台任务失败：%s",
+                status_text,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             QMessageBox.critical(self, "操作失败", str(exc))
 
         def handle_result(result) -> None:
@@ -773,10 +802,16 @@ class NoteShareMainWindow(QMainWindow):
         try:
             save_config(self._collect_form_config())
             self.state.config_data = load_config()
+            self._set_log_level_combo(str(self.state.config_data.get("log_level", "error")))
+            self.logger = configure_app_logger(self.state.config_data.get("log_level", "error"))
             self._load_bucket_options_from_config()
             self._sync_config_section_summary()
             self._set_status("配置已保存")
         except OSError as exc:
+            self.logger.error(
+                "保存配置失败",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             QMessageBox.critical(self, "保存失败", str(exc))
 
     def test_connection(self) -> None:
@@ -909,6 +944,13 @@ class NoteShareMainWindow(QMainWindow):
             return
 
         upload_item_content_md5s: dict[tuple[str, str, int], str] = {}
+        self.logger.info(
+            "上传任务开始：bucket=%s, 文件数=%s, 总大小=%s, 文件=%s",
+            bucket,
+            len(upload_items),
+            sum(item_size for _item_path, _item_key, item_size in upload_items),
+            self._format_upload_items_for_log(upload_items),
+        )
         self._start_upload_progress(upload_items)
         cancel_event = Event()
         self._upload_cancel_event = cancel_event
@@ -1141,6 +1183,12 @@ class NoteShareMainWindow(QMainWindow):
                 self._set_status(f"文件已上传到 {bucket}/{uploaded_items[0][1]}")
             else:
                 self._set_status(f"已上传 {len(uploaded_items)} 个文件到 {bucket}")
+            self.logger.info(
+                "上传任务完成：bucket=%s, 文件数=%s, 文件=%s",
+                bucket,
+                len(uploaded_items),
+                self._format_upload_items_for_log(uploaded_items),
+            )
             self.refresh_objects()
 
         def on_error(exc: Exception) -> None:
@@ -1151,6 +1199,11 @@ class NoteShareMainWindow(QMainWindow):
                     self._resume_upload_reason = "pause"
                     self._mark_upload_paused(upload_items)
                     self._set_status("上传已暂停，可继续上传")
+                    self.logger.info(
+                        "上传任务已暂停：bucket=%s, 文件=%s",
+                        bucket,
+                        self._format_upload_items_for_log(upload_items),
+                    )
                 else:
                     self._cleanup_upload_sessions(
                         manager,
@@ -1164,12 +1217,23 @@ class NoteShareMainWindow(QMainWindow):
                     self.resume_upload_button.setEnabled(False)
                     self._mark_upload_cancelled()
                     self._set_status("上传已取消，下次会重新上传")
+                    self.logger.info(
+                        "上传任务已取消：bucket=%s, 文件=%s",
+                        bucket,
+                        self._format_upload_items_for_log(upload_items),
+                    )
                 return
             self._mark_upload_failed(exc)
             self._resume_upload_bucket = bucket
             self._resume_upload_items = list(upload_items)
             self._resume_upload_reason = "failure"
             self.resume_upload_button.setEnabled(True)
+            self.logger.error(
+                "上传任务失败：bucket=%s, 文件=%s",
+                bucket,
+                self._format_upload_items_for_log(upload_items),
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             QMessageBox.critical(self, "操作失败", str(exc))
 
         def on_finished() -> None:
@@ -1897,6 +1961,15 @@ class NoteShareMainWindow(QMainWindow):
 
     def _format_speed(self, bytes_per_second: float) -> str:
         return f"{self._format_size(max(0, int(bytes_per_second)))}/s"
+
+    def _format_upload_items_for_log(self, upload_items: list[tuple[str, str, int]]) -> str:
+        parts = [
+            f"local_path={item_path}, object_key={item_key}, size={item_size}"
+            for item_path, item_key, item_size in upload_items[:10]
+        ]
+        if len(upload_items) > 10:
+            parts.append(f"... 其余 {len(upload_items) - 10} 个文件")
+        return " | ".join(parts)
 
     def _auto_refresh_on_startup(self) -> None:
         if self._can_auto_refresh_on_startup():
