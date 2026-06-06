@@ -59,6 +59,10 @@ from upload_resume_store import (
     make_upload_session_key,
     save_upload_session,
 )
+from webdav_sync import (
+    download_config_from_webdav as download_config_file_from_webdav,
+    upload_config_to_webdav as upload_config_file_to_webdav,
+)
 from worker_client import WorkerClient, WorkerClientError
 
 
@@ -134,6 +138,10 @@ class NoteShareMainWindow(QMainWindow):
         self.expire_edit = self._make_line_edit()
         self.worker_base_url_edit = self._make_line_edit()
         self.worker_admin_token_edit = self._make_line_edit(password=True)
+        self.webdav_url_edit = self._make_line_edit()
+        self.webdav_username_edit = self._make_line_edit()
+        self.webdav_password_edit = self._make_line_edit(password=True)
+        self.webdav_remote_path_edit = self._make_line_edit()
         self.bucket_combo = QComboBox()
         self.bucket_combo.setEditable(True)
         self.bucket_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -151,6 +159,10 @@ class NoteShareMainWindow(QMainWindow):
             self._make_labeled_wrapper("默认过期秒数", self.expire_edit),
             self._make_labeled_wrapper("Worker Base URL", self.worker_base_url_edit),
             self._make_labeled_wrapper("Worker Admin Token", self.worker_admin_token_edit),
+            self._make_labeled_wrapper("WebDAV URL", self.webdav_url_edit),
+            self._make_labeled_wrapper("WebDAV 用户名", self.webdav_username_edit),
+            self._make_labeled_wrapper("WebDAV 密码", self.webdav_password_edit),
+            self._make_labeled_wrapper("WebDAV 远端路径", self.webdav_remote_path_edit),
             self._make_labeled_wrapper("Bucket", self.bucket_combo),
             self._make_labeled_wrapper("日志等级", self.log_level_combo),
         ]
@@ -162,7 +174,15 @@ class NoteShareMainWindow(QMainWindow):
         self.save_button = self._make_button("保存配置")
         self.test_button = self._make_button("测试连接", primary=True)
         self.load_buckets_button = self._make_button("加载 Bucket")
-        self.config_action_buttons = [self.save_button, self.test_button, self.load_buckets_button]
+        self.upload_config_button = self._make_button("上传配置")
+        self.download_config_button = self._make_button("下载配置", primary=True)
+        self.config_action_buttons = [
+            self.save_button,
+            self.test_button,
+            self.load_buckets_button,
+            self.upload_config_button,
+            self.download_config_button,
+        ]
         self.config_actions_layout = QGridLayout()
         self.config_actions_layout.setContentsMargins(0, 0, 0, 0)
         self.config_actions_layout.setHorizontalSpacing(12)
@@ -314,6 +334,8 @@ class NoteShareMainWindow(QMainWindow):
         self.save_button.clicked.connect(self.save_current_config)
         self.test_button.clicked.connect(self.test_connection)
         self.load_buckets_button.clicked.connect(self.load_buckets)
+        self.upload_config_button.clicked.connect(self.upload_config_to_webdav)
+        self.download_config_button.clicked.connect(self.download_config_from_webdav)
         self.refresh_button.clicked.connect(self.refresh_objects)
         self.upload_button.clicked.connect(self.upload_file)
         self.pause_upload_button.clicked.connect(self._request_pause_upload)
@@ -416,6 +438,10 @@ class NoteShareMainWindow(QMainWindow):
         self.endpoint_edit.setText(str(config.get("endpoint_url", "")))
         self.worker_base_url_edit.setText(str(config.get("worker_base_url", "")))
         self.worker_admin_token_edit.setText(str(config.get("worker_admin_token", "")))
+        self.webdav_url_edit.setText(str(config.get("webdav_url", "")))
+        self.webdav_username_edit.setText(str(config.get("webdav_username", "")))
+        self.webdav_password_edit.setText(str(config.get("webdav_password", "")))
+        self.webdav_remote_path_edit.setText(str(config.get("webdav_remote_path", "noteshare/config.json")))
         self.expire_edit.setText(str(config.get("url_expire_seconds", 3600)))
         self.bucket_combo.setCurrentText(str(config.get("default_bucket", "")))
         self._set_log_level_combo(str(config.get("log_level", "error")))
@@ -521,6 +547,10 @@ class NoteShareMainWindow(QMainWindow):
             "endpoint_url": self.endpoint_edit.text().strip(),
             "worker_base_url": self.worker_base_url_edit.text().strip(),
             "worker_admin_token": self.worker_admin_token_edit.text().strip(),
+            "webdav_url": self.webdav_url_edit.text().strip(),
+            "webdav_username": self.webdav_username_edit.text().strip(),
+            "webdav_password": self.webdav_password_edit.text().strip(),
+            "webdav_remote_path": self.webdav_remote_path_edit.text().strip(),
             "default_bucket": self.bucket_combo.currentText().strip(),
             "url_expire_seconds": self.expire_edit.text().strip(),
             "log_level": self._current_log_level(),
@@ -814,11 +844,7 @@ class NoteShareMainWindow(QMainWindow):
     def save_current_config(self) -> None:
         try:
             save_config(self._collect_form_config())
-            self.state.config_data = load_config()
-            self._set_log_level_combo(str(self.state.config_data.get("log_level", "error")))
-            self.logger = configure_app_logger(self.state.config_data.get("log_level", "error"))
-            self._load_bucket_options_from_config()
-            self._sync_config_section_summary()
+            self._reload_config_state(load_into_form=False)
             self._set_status("配置已保存")
         except OSError as exc:
             self.logger.error(
@@ -826,6 +852,52 @@ class NoteShareMainWindow(QMainWindow):
                 exc_info=(type(exc), exc, exc.__traceback__),
             )
             QMessageBox.critical(self, "保存失败", str(exc))
+
+    def upload_config_to_webdav(self) -> None:
+        try:
+            save_config(self._collect_form_config())
+            self._reload_config_state(load_into_form=False)
+        except OSError as exc:
+            self.logger.error(
+                "上传配置前保存本地配置失败",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            QMessageBox.critical(self, "保存失败", str(exc))
+            return
+
+        config = dict(self.state.config_data)
+
+        def task() -> str:
+            return upload_config_file_to_webdav(config)
+
+        def on_success(remote_path: str) -> None:
+            self._set_status(f"配置已上传到 WebDAV：{remote_path}")
+            QMessageBox.information(self, "上传完成", f"本地配置已上传到 WebDAV：\n{remote_path}")
+
+        self._run_task("正在上传配置到 WebDAV...", task, on_result=on_success)
+
+    def download_config_from_webdav(self) -> None:
+        config = self._collect_form_config()
+
+        def task() -> dict[str, object]:
+            return download_config_file_from_webdav(config)
+
+        def on_success(_config: dict[str, object]) -> None:
+            self._reload_config_state(load_into_form=True)
+            self._refresh_storage_summary(reset_loaded_state=True)
+            self._set_status("已从 WebDAV 下载并恢复配置")
+            QMessageBox.information(self, "下载完成", "远端配置已下载并恢复到本地。")
+
+        self._run_task("正在从 WebDAV 下载配置...", task, on_result=on_success)
+
+    def _reload_config_state(self, *, load_into_form: bool) -> None:
+        self.state.config_data = load_config()
+        if load_into_form:
+            self._load_config_to_form()
+        self._set_log_level_combo(str(self.state.config_data.get("log_level", "error")))
+        self.logger = configure_app_logger(self.state.config_data.get("log_level", "error"))
+        self._load_bucket_options_from_config()
+        self._sync_config_section_summary()
 
     def test_connection(self) -> None:
         manager = self._make_manager()

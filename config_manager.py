@@ -23,6 +23,10 @@ def get_default_config() -> dict[str, Any]:
         "endpoint_url": "",
         "worker_base_url": "",
         "worker_admin_token": "",
+        "webdav_url": "",
+        "webdav_username": "",
+        "webdav_password": "",
+        "webdav_remote_path": "noteshare/config.json",
         "default_bucket": "",
         "url_expire_seconds": 3600,
         "log_level": "error",
@@ -41,6 +45,12 @@ def _clean_config(raw: dict[str, Any]) -> dict[str, Any]:
     config["endpoint_url"] = str(config.get("endpoint_url", "")).strip()
     config["worker_base_url"] = str(config.get("worker_base_url", "")).strip()
     config["worker_admin_token"] = str(config.get("worker_admin_token", "")).strip()
+    config["webdav_url"] = str(config.get("webdav_url", "")).strip()
+    config["webdav_username"] = str(config.get("webdav_username", "")).strip()
+    config["webdav_password"] = str(config.get("webdav_password", "")).strip()
+    config["webdav_remote_path"] = (
+        str(config.get("webdav_remote_path", "")).strip() or "noteshare/config.json"
+    )
     config["default_bucket"] = str(config.get("default_bucket", "")).strip()
     config["log_level"] = clean_log_level(config.get("log_level", "error"))
 
@@ -63,6 +73,10 @@ def _clean_config(raw: dict[str, Any]) -> dict[str, Any]:
     config["object_url_settings"] = _clean_object_url_settings(object_url_settings)
 
     return config
+
+
+def clean_config_data(raw: dict[str, Any]) -> dict[str, Any]:
+    return _clean_config(raw)
 
 
 def _clean_object_url_settings(raw: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
